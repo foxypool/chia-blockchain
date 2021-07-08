@@ -589,4 +589,5 @@ class FarmerAPI:
                     f"Error in OG pooling: {submit_partial_response['error_code'], submit_partial_response['error_message']}"
                 )
         else:
+            self.farmer.log.info("The partial submitted to the OG pool was accepted")
             og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])
