@@ -142,8 +142,8 @@ class Farmer:
         self.pool_url = self.config.get("pool_url")
         self.pool_payout_address = self.config.get("pool_payout_address")
         self.iters_limit = calculate_sp_interval_iters(self.constants, self.constants.POOL_SUB_SLOT_ITERS)
-        self.pool_minimum_difficulty = 1
-        self.og_pool_state: Dict[bytes, OgPoolState] = {}
+        self.pool_minimum_difficulty: uint64 = uint64(1)
+        self.og_pool_state: OgPoolState = OgPoolState(difficulty=self.pool_minimum_difficulty)
         self.pool_var_diff_target_in_seconds = 5 * 60
         self.pool_reward_target = self.pool_target
         self.adjust_pool_difficulties_task: Optional[asyncio.Task] = None
@@ -171,16 +171,15 @@ class Farmer:
                 pool_info = await self.pool_api_client.get_pool_info()
                 has_pool_info = True
             except Exception as e:
-                self.log.error(f"Error retrieving pool info: {e}")
+                self.log.error(f"Error retrieving og pool info: {e}")
                 await sleep(5)
 
         pool_name = pool_info["name"]
-        self.log.info(f"Connected to pool {pool_name}")
+        self.log.info(f"Connected to og pool {pool_name}")
         self.pool_var_diff_target_in_seconds = pool_info["var_diff_target_in_seconds"]
 
-        self.pool_minimum_difficulty = pool_info["minimum_difficulty"]
-        for key in self.get_private_keys():
-            self.og_pool_state[bytes(key.get_g1())] = OgPoolState(difficulty=self.pool_minimum_difficulty)
+        self.pool_minimum_difficulty = uint64(pool_info["minimum_difficulty"])
+        self.og_pool_state.difficulty = self.pool_minimum_difficulty
 
         pool_target = bytes.fromhex(pool_info["target_puzzle_hash"][2:])
         assert len(pool_target) == 32
@@ -715,27 +714,24 @@ class Farmer:
             if time_slept < 60:
                 continue
             time_slept = 0
-            for key in self.get_private_keys():
-                og_pool_state = self.og_pool_state.get(bytes(key.get_g1()))
-                if og_pool_state is None:
-                    continue
-                if (time.time() - og_pool_state.last_partial_submit_timestamp) < self.pool_var_diff_target_in_seconds:
-                    continue
-                diff_since_last_partial_submit_in_seconds = time.time() - og_pool_state.last_partial_submit_timestamp
-                missing_partial_submits = int(diff_since_last_partial_submit_in_seconds // self.pool_var_diff_target_in_seconds)
-                new_difficulty = uint64(max(
-                    (og_pool_state.difficulty - (missing_partial_submits * 2)),
-                    self.pool_minimum_difficulty
-                ))
-                if new_difficulty == og_pool_state.difficulty:
-                    continue
-                old_difficulty = og_pool_state.difficulty
-                og_pool_state.difficulty = new_difficulty
-                log.info(
-                    f"Lowered the pool difficulty for PPK {key.get_g1().hex()} from {old_difficulty} to "
-                    f"{new_difficulty} due to no partial submits within the last "
-                    f"{int(round(diff_since_last_partial_submit_in_seconds))} seconds"
-                )
+            if (time.time() - self.og_pool_state.last_partial_submit_timestamp) < self.pool_var_diff_target_in_seconds:
+                continue
+            diff_since_last_partial_submit_in_seconds = time.time() - self.og_pool_state.last_partial_submit_timestamp
+            missing_partial_submits = int(
+                diff_since_last_partial_submit_in_seconds // self.pool_var_diff_target_in_seconds)
+            new_difficulty = uint64(max(
+                (self.og_pool_state.difficulty - (missing_partial_submits * 2)),
+                self.pool_minimum_difficulty
+            ))
+            if new_difficulty == self.og_pool_state.difficulty:
+                continue
+            old_difficulty = self.og_pool_state.difficulty
+            self.og_pool_state.difficulty = new_difficulty
+            log.info(
+                f"Lowered the pool difficulty from {old_difficulty} to "
+                f"{new_difficulty} due to no partial submits within the last "
+                f"{int(round(diff_since_last_partial_submit_in_seconds))} seconds"
+            )
 
     async def _periodically_check_pool_reward_target_task(self):
         time_slept = 0

@@ -252,7 +252,7 @@ class FarmerAPI:
 
             pool_public_key = new_proof_of_space.proof.pool_public_key
             if pool_public_key is not None and self.farmer.is_pooling_enabled():
-                await self.process_new_proof_of_space_for_pool(
+                await self.process_new_proof_of_space_for_og_pool(
                     new_proof_of_space,
                     peer,
                     pool_public_key,
@@ -441,13 +441,8 @@ class FarmerAPI:
         difficulty = new_signage_point.difficulty
         sub_slot_iters = new_signage_point.sub_slot_iters
         if self.farmer.is_pooling_enabled():
-            lowest_difficulty: Optional[uint64] = None
-            for _, og_pool_state in self.farmer.og_pool_state.items():
-                if lowest_difficulty is None or lowest_difficulty > og_pool_state.difficulty:
-                    lowest_difficulty = og_pool_state.difficulty
-            if lowest_difficulty is not None:
-                difficulty = lowest_difficulty
-                sub_slot_iters = self.farmer.constants.POOL_SUB_SLOT_ITERS
+            sub_slot_iters = self.farmer.constants.POOL_SUB_SLOT_ITERS
+            difficulty = self.farmer.og_pool_state.difficulty
 
         message = harvester_protocol.NewSignagePointHarvester(
             new_signage_point.challenge_hash,
@@ -509,16 +504,14 @@ class FarmerAPI:
     async def respond_plots(self, _: harvester_protocol.RespondPlots):
         self.farmer.log.warning("Respond plots came too late")
 
-    async def process_new_proof_of_space_for_pool(
+    async def process_new_proof_of_space_for_og_pool(
             self,
             new_proof_of_space: harvester_protocol.NewProofOfSpace,
             peer: ws.WSChiaConnection,
             pool_public_key: G1Element,
             computed_quality_string: bytes32
     ):
-        og_pool_state = self.farmer.og_pool_state.get(bytes(pool_public_key))
-        if og_pool_state is None:
-            return
+        og_pool_state = self.farmer.og_pool_state
 
         # Otherwise, send the proof of space to the pool
         # When we win a block, we also send the partial to the pool
@@ -531,7 +524,7 @@ class FarmerAPI:
         )
         if required_iters >= self.farmer.iters_limit:
             self.farmer.log.debug(
-                f"Proof of space not good enough for pool difficulty of {og_pool_state.difficulty}"
+                f"Proof of space not good enough for og pool difficulty of {og_pool_state.difficulty}"
             )
             return
 
@@ -575,25 +568,25 @@ class FarmerAPI:
         agg_sig: G2Element = AugSchemeMPL.aggregate([plot_signature, authentication_signature])
 
         submit_partial = SubmitPartial(payload, agg_sig, og_pool_state.difficulty)
-        self.farmer.log.debug("Submitting partial ..")
+        self.farmer.log.debug("Submitting partial to og pool ..")
         og_pool_state.last_partial_submit_timestamp = time.time()
         submit_partial_response: Dict
         try:
             submit_partial_response = await self.farmer.pool_api_client.submit_partial(submit_partial)
         except Exception as e:
-            self.farmer.log.error(f"Error submitting partial to pool: {e}")
+            self.farmer.log.error(f"Error submitting partial to og pool: {e}")
             return
-        self.farmer.log.debug(f"Pool response: {submit_partial_response}")
+        self.farmer.log.debug(f"OG pool response: {submit_partial_response}")
         if "error_code" in submit_partial_response:
             if submit_partial_response["error_code"] == 5:
                 self.farmer.log.info(
-                    "Difficulty too low, adjusting to pool difficulty "
+                    "Local og pool difficulty too low, adjusting to og pool difficulty "
                     f"({submit_partial_response['current_difficulty']})"
                 )
-                og_pool_state.difficulty = submit_partial_response["current_difficulty"]
+                og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])
             else:
                 self.farmer.log.error(
-                    f"Error in pooling: {submit_partial_response['error_code'], submit_partial_response['error_message']}"
+                    f"Error in og pooling: {submit_partial_response['error_code'], submit_partial_response['error_message']}"
                 )
         else:
-            og_pool_state.difficulty = submit_partial_response["current_difficulty"]
+            og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])
