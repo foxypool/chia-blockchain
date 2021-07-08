@@ -524,7 +524,7 @@ class FarmerAPI:
         )
         if required_iters >= self.farmer.iters_limit:
             self.farmer.log.debug(
-                f"Proof of space not good enough for og pool difficulty of {og_pool_state.difficulty}"
+                f"Proof of space not good enough for OG pool difficulty of {og_pool_state.difficulty}"
             )
             return
 
@@ -568,25 +568,25 @@ class FarmerAPI:
         agg_sig: G2Element = AugSchemeMPL.aggregate([plot_signature, authentication_signature])
 
         submit_partial = SubmitPartial(payload, agg_sig, og_pool_state.difficulty)
-        self.farmer.log.debug("Submitting partial to og pool ..")
+        self.farmer.log.debug("Submitting partial to OG pool ..")
         og_pool_state.last_partial_submit_timestamp = time.time()
         submit_partial_response: Dict
         try:
             submit_partial_response = await self.farmer.pool_api_client.submit_partial(submit_partial)
         except Exception as e:
-            self.farmer.log.error(f"Error submitting partial to og pool: {e}")
+            self.farmer.log.error(f"Error submitting partial to OG pool: {e}")
             return
         self.farmer.log.debug(f"OG pool response: {submit_partial_response}")
         if "error_code" in submit_partial_response:
             if submit_partial_response["error_code"] == 5:
                 self.farmer.log.info(
-                    "Local og pool difficulty too low, adjusting to og pool difficulty "
+                    "Local OG pool difficulty too low, adjusting to OG pool difficulty "
                     f"({submit_partial_response['current_difficulty']})"
                 )
                 og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])
             else:
                 self.farmer.log.error(
-                    f"Error in og pooling: {submit_partial_response['error_code'], submit_partial_response['error_message']}"
+                    f"Error in OG pooling: {submit_partial_response['error_code'], submit_partial_response['error_message']}"
                 )
         else:
             og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])

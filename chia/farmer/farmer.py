@@ -156,7 +156,7 @@ class Farmer:
         self.update_pool_state_task = asyncio.create_task(self._periodically_update_pool_state_task())
         self.cache_clear_task = asyncio.create_task(self._periodically_clear_cache_and_refresh_task())
         if not self.is_pooling_enabled():
-            self.log.info(f"Not og pooling as 'pool_payout_address' and/or 'pool_url' are missing in your config")
+            self.log.info(f"Not OG pooling as 'pool_payout_address' and/or 'pool_url' are missing in your config")
             return
         self.pool_api_client = PoolApiClient(self.pool_url)
         await self.initialize_pooling()
@@ -171,11 +171,11 @@ class Farmer:
                 pool_info = await self.pool_api_client.get_pool_info()
                 has_pool_info = True
             except Exception as e:
-                self.log.error(f"Error retrieving og pool info: {e}")
+                self.log.error(f"Error retrieving OG pool info: {e}")
                 await sleep(5)
 
         pool_name = pool_info["name"]
-        self.log.info(f"Connected to og pool {pool_name}")
+        self.log.info(f"Connected to OG pool {pool_name}")
         self.pool_var_diff_target_in_seconds = pool_info["var_diff_target_in_seconds"]
 
         self.pool_minimum_difficulty = uint64(pool_info["minimum_difficulty"])
