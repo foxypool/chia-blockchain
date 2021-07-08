@@ -728,7 +728,7 @@ class Farmer:
             old_difficulty = self.og_pool_state.difficulty
             self.og_pool_state.difficulty = new_difficulty
             log.info(
-                f"Lowered the pool difficulty from {old_difficulty} to "
+                f"Lowered the OG pool difficulty from {old_difficulty} to "
                 f"{new_difficulty} due to no partial submits within the last "
                 f"{int(round(diff_since_last_partial_submit_in_seconds))} seconds"
             )
