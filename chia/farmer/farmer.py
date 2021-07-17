@@ -31,7 +31,9 @@ from chia.protocols.pool_protocol import (
 )
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
 from chia.server.outbound_message import NodeType, make_msg
+from chia.server.server import ssl_context_for_root
 from chia.server.ws_connection import WSChiaConnection
+from chia.ssl.create_ssl import get_mozilla_ca_crt
 from chia.types.blockchain_format.proof_of_space import ProofOfSpace
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
@@ -317,15 +319,13 @@ class Farmer:
         assert owner_sk.get_g1() == pool_config.owner_public_key
         signature: G2Element = AugSchemeMPL.sign(owner_sk, post_farmer_payload.get_hash())
         post_farmer_request = PostFarmerRequest(post_farmer_payload, signature)
-        post_farmer_body = json.dumps(post_farmer_request.to_json_dict())
 
-        headers = {
-            "content-type": "application/json;",
-        }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{pool_config.pool_url}/farmer", data=post_farmer_body, headers=headers
+                    f"{pool_config.pool_url}/farmer",
+                    json=post_farmer_request.to_json_dict(),
+                    ssl=ssl_context_for_root(get_mozilla_ca_crt()),
                 ) as resp:
                     if resp.ok:
                         response: Dict = json.loads(await resp.text())
@@ -357,11 +357,14 @@ class Farmer:
         assert owner_sk.get_g1() == pool_config.owner_public_key
         signature: G2Element = AugSchemeMPL.sign(owner_sk, put_farmer_payload.get_hash())
         put_farmer_request = PutFarmerRequest(put_farmer_payload, signature)
-        put_farmer_body = json.dumps(put_farmer_request.to_json_dict())
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.put(f"{pool_config.pool_url}/farmer", data=put_farmer_body) as resp:
+                async with session.put(
+                    f"{pool_config.pool_url}/farmer",
+                    json=put_farmer_request.to_json_dict(),
+                    ssl=ssl_context_for_root(get_mozilla_ca_crt()),
+                ) as resp:
                     if resp.ok:
                         response: Dict = json.loads(await resp.text())
                         self.log.info(f"PUT /farmer response: {response}")

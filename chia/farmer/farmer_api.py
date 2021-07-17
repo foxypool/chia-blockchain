@@ -19,6 +19,8 @@ from chia.protocols.pool_protocol import (
 )
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
 from chia.server.outbound_message import NodeType, make_msg
+from chia.server.server import ssl_context_for_root
+from chia.ssl.create_ssl import get_mozilla_ca_crt
 from chia.types.blockchain_format.pool_target import PoolTarget
 from chia.types.blockchain_format.proof_of_space import ProofOfSpace
 from chia.types.blockchain_format.sized_bytes import bytes32
@@ -209,18 +211,19 @@ class FarmerAPI:
                 agg_sig: G2Element = AugSchemeMPL.aggregate([plot_signature, authentication_signature])
 
                 post_partial_request: PostPartialRequest = PostPartialRequest(payload, agg_sig)
-                post_partial_body = json.dumps(post_partial_request.to_json_dict())
                 self.farmer.log.info(
                     f"Submitting partial for {post_partial_request.payload.launcher_id.hex()} to {pool_url}"
                 )
                 pool_state_dict["points_found_since_start"] += pool_state_dict["current_difficulty"]
                 pool_state_dict["points_found_24h"].append((time.time(), pool_state_dict["current_difficulty"]))
-                headers = {
-                    "content-type": "application/json;",
-                }
+
                 try:
                     async with aiohttp.ClientSession() as session:
-                        async with session.post(f"{pool_url}/partial", data=post_partial_body, headers=headers) as resp:
+                        async with session.post(
+                            f"{pool_url}/partial",
+                            json=post_partial_request.to_json_dict(),
+                            ssl=ssl_context_for_root(get_mozilla_ca_crt()),
+                        ) as resp:
                             if resp.ok:
                                 pool_response: Dict = json.loads(await resp.text())
                                 self.farmer.log.info(f"Pool response: {pool_response}")
