@@ -113,7 +113,7 @@ kwargs = dict(
         "chia.ssl": ["chia_ca.crt", "chia_ca.key", "dst_root_ca.pem"],
         "mozilla-ca": ["cacert.pem"],
     },
-    version="1.2.9",
+    version="1.2.10",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     zip_safe=False,

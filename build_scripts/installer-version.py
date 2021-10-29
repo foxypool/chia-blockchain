@@ -8,7 +8,7 @@ from setuptools_scm import get_version
 def main():
     windows = len(sys.argv) > 1 and "win" in sys.argv[1]  # Special case windows to 0.1.6225
 
-    print("1.2.9")
+    print("1.2.10")
     return
 
     scm_full_version = get_version(root="..", relative_to=__file__)
