@@ -7,8 +7,8 @@ from chia.util.ints import uint64
 from chia.util.streamable import streamable, Streamable
 
 
-@dataclass(frozen=True)
 @streamable
+@dataclass(frozen=True)
 class PartialPayload(Streamable):
     proof_of_space: ProofOfSpace
     sp_hash: bytes32
@@ -16,8 +16,8 @@ class PartialPayload(Streamable):
     payout_address: str  # The farmer can choose where to send the rewards. This can take a few minutes
 
 
-@dataclass(frozen=True)
 @streamable
+@dataclass(frozen=True)
 class SubmitPartial(Streamable):
     payload: PartialPayload
     partial_aggregate_signature: G2Element  # Sig of partial by plot key and pool key
