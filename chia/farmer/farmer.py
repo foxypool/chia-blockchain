@@ -261,7 +261,7 @@ class Farmer:
         self.pool_reward_target = pool_target
         address_prefix = self.config["network_overrides"]["config"][self.config["selected_network"]]["address_prefix"]
         pool_target_encoded = encode_puzzle_hash(pool_target, address_prefix)
-        if self.pool_target is not pool_target or self.pool_target_encoded is not pool_target_encoded:
+        if self.pool_target != pool_target or self.pool_target_encoded != pool_target_encoded:
             self.set_reward_targets(farmer_target_encoded=None, pool_target_encoded=pool_target_encoded)
 
     def _close(self):
@@ -822,7 +822,7 @@ class Farmer:
             if time_slept < 5 * 60:
                 continue
             time_slept = 0
-            if self.pool_target is self.pool_reward_target:
+            if self.pool_target == self.pool_reward_target:
                 continue
             address_prefix = self.config["network_overrides"]["config"][self.config["selected_network"]]["address_prefix"]
             pool_target_encoded = encode_puzzle_hash(self.pool_reward_target, address_prefix)
