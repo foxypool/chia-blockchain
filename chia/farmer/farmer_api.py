@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from typing import Callable, Optional, List, Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from blspy import AugSchemeMPL, G2Element, G1Element, PrivateKey
@@ -14,17 +14,17 @@ from chia.farmer.farmer import Farmer
 from chia.farmer.pooling.og_pool_protocol import PartialPayload, SubmitPartial
 from chia.protocols import farmer_protocol, harvester_protocol
 from chia.protocols.harvester_protocol import (
-    PoolDifficulty,
-    PlotSyncStart,
-    PlotSyncPlotList,
-    PlotSyncPathList,
     PlotSyncDone,
+    PlotSyncPathList,
+    PlotSyncPlotList,
+    PlotSyncStart,
+    PoolDifficulty,
 )
 from chia.protocols.pool_protocol import (
-    get_current_authentication_token,
     PoolErrorCode,
-    PostPartialRequest,
     PostPartialPayload,
+    PostPartialRequest,
+    get_current_authentication_token,
 )
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
 from chia.server.outbound_message import NodeType, make_msg
@@ -52,9 +52,6 @@ class FarmerAPI:
 
     def __init__(self, farmer) -> None:
         self.farmer = farmer
-
-    def _set_state_changed_callback(self, callback: Callable):
-        self.farmer.state_changed_callback = callback
 
     @api_request
     @peer_required
@@ -274,6 +271,17 @@ class FarmerAPI:
                 except Exception as e:
                     self.farmer.log.error(f"Error connecting to pool: {e}")
                     return
+
+                self.farmer.state_changed(
+                    "submitted_partial",
+                    {
+                        "launcher_id": post_partial_request.payload.launcher_id.hex(),
+                        "pool_url": pool_url,
+                        "current_difficulty": pool_state_dict["current_difficulty"],
+                        "points_acknowledged_since_start": pool_state_dict["points_acknowledged_since_start"],
+                        "points_acknowledged_24h": pool_state_dict["points_acknowledged_24h"],
+                    },
+                )
 
                 return
 
