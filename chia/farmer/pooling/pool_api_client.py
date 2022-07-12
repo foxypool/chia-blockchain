@@ -1,5 +1,6 @@
 from aiohttp import ClientSession, ClientTimeout
 
+from chia import __version__
 from chia.farmer.pooling.og_pool_protocol import SubmitPartial
 from chia.server.server import ssl_context_for_root
 from chia.ssl.create_ssl import get_mozilla_ca_crt
@@ -24,6 +25,7 @@ class PoolApiClient:
             async with client.post(
                     f"{self.base_url}/partial",
                     json=submit_partial.to_json_dict(),
-                    ssl=self.ssl_context
+                    ssl=self.ssl_context,
+                    headers={"x-client-version": __version__},
             ) as res:
                 return await res.json()
