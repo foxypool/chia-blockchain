@@ -26,6 +26,6 @@ class PoolApiClient:
                     f"{self.base_url}/partial",
                     json=submit_partial.to_json_dict(),
                     ssl=self.ssl_context,
-                    headers={"x-client-version": __version__},
+                    headers={"User-Agent": f"Chia Blockchain/{__version__}"},
             ) as res:
                 return await res.json()
