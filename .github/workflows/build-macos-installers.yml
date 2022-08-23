@@ -28,7 +28,7 @@ jobs:
       matrix:
         python-version: [3.9]
         os:
-          - runs-on: macos-10.14
+          - runs-on: macos-10.15
             name: intel
             file-suffix: ""
             mac-package-name: "Chia-darwin-x64"
