@@ -15,12 +15,7 @@ from chia.consensus.constants import ConsensusConstants
 from chia.consensus.pot_iterations import calculate_sp_interval_iters
 from chia.farmer.pooling.og_pool_state import OgPoolState
 from chia.farmer.pooling.pool_api_client import PoolApiClient
-from chia.daemon.keychain_proxy import (
-    KeychainProxy,
-    KeychainProxyConnectionFailure,
-    connect_to_keychain_and_validate,
-    wrap_local_keychain,
-)
+from chia.daemon.keychain_proxy import KeychainProxy, connect_to_keychain_and_validate, wrap_local_keychain
 from chia.plot_sync.delta import Delta
 from chia.plot_sync.receiver import Receiver
 from chia.pools.pool_config import PoolWalletConfig, add_auth_key, load_pool_config
@@ -46,6 +41,7 @@ from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
 from chia.util.byte_types import hexstr_to_bytes
 from chia.util.config import config_path_for_filename, load_config, lock_and_load_config, save_config
+from chia.util.errors import KeychainProxyConnectionFailure
 from chia.util.hash import std_hash
 from chia.util.ints import uint8, uint16, uint32, uint64
 from chia.util.keychain import Keychain
@@ -145,7 +141,7 @@ class Farmer:
             else:
                 self.keychain_proxy = await connect_to_keychain_and_validate(self._root_path, self.log)
                 if not self.keychain_proxy:
-                    raise KeychainProxyConnectionFailure("Failed to connect to keychain service")
+                    raise KeychainProxyConnectionFailure()
         return self.keychain_proxy
 
     async def get_all_private_keys(self):
@@ -154,7 +150,11 @@ class Farmer:
 
     async def setup_keys(self) -> bool:
         no_keys_error_str = "No keys exist. Please run 'chia keys generate' or open the UI."
-        self.all_root_sks: List[PrivateKey] = [sk for sk, _ in await self.get_all_private_keys()]
+        try:
+            self.all_root_sks: List[PrivateKey] = [sk for sk, _ in await self.get_all_private_keys()]
+        except KeychainProxyConnectionFailure:
+            return False
+
         self._private_keys = [master_sk_to_farmer_sk(sk) for sk in self.all_root_sks] + [
             master_sk_to_pool_sk(sk) for sk in self.all_root_sks
         ]
