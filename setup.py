@@ -59,7 +59,7 @@ dev_dependencies = [
     "ipython",  # For asyncio debugging
     "pyinstaller==5.0",
     "types-aiofiles",
-    "types-click",
+    "types-click~=7.1",
     "types-cryptography",
     "types-pkg_resources",
     "types-pyyaml",
@@ -88,6 +88,7 @@ kwargs = dict(
         "chia.clvm",
         "chia.consensus",
         "chia.daemon",
+        "chia.data_layer",
         "chia.full_node",
         "chia.timelord",
         "chia.farmer",
@@ -107,6 +108,7 @@ kwargs = dict(
         "chia.types",
         "chia.util",
         "chia.wallet",
+        "chia.wallet.db_wallet",
         "chia.wallet.puzzles",
         "chia.wallet.rl_wallet",
         "chia.wallet.cat_wallet",
@@ -132,6 +134,8 @@ kwargs = dict(
             "chia_timelord = chia.server.start_timelord:main",
             "chia_timelord_launcher = chia.timelord.timelord_launcher:main",
             "chia_full_node_simulator = chia.simulator.start_simulator:main",
+            "chia_data_layer = chia.server.start_data_layer:main",
+            "chia_data_layer_http = chia.data_layer.data_layer_server:main",
         ]
     },
     package_data={
