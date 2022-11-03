@@ -6,8 +6,8 @@ on:
       - 'long_lived/**'
       - main
       - 'release/**'
-    tags:
-        - '**'
+  release:
+    types: [published]
   pull_request:
     branches:
       - '**'
@@ -33,6 +33,7 @@ jobs:
             file-suffix: ""
             mac-package-name: "Chia-darwin-x64"
             glue-name: "build-macos"
+            bladebit-suffix: macos-x86-64.tar.gz
 
     steps:
       - uses: Chia-Network/actions/clean-workspace@main
@@ -48,21 +49,40 @@ jobs:
       - name: Cleanup any leftovers that exist from previous runs
         run: bash build_scripts/clean-runner.sh || true
 
+      - name: Set Env
+        if: github.event_name == 'release' && github.event.action == 'published'
+        run: |
+          PRE_RELEASE=$(jq -r '.release.prerelease' "$GITHUB_EVENT_PATH")
+          RELEASE_TAG=$(jq -r '.release.tag_name' "$GITHUB_EVENT_PATH")
+          echo "RELEASE=true" >>$GITHUB_ENV
+          echo "PRE_RELEASE=$PRE_RELEASE" >>$GITHUB_ENV
+          echo "RELEASE_TAG=$RELEASE_TAG" >>$GITHUB_ENV
+          if [ $PRE_RELEASE = false ]; then
+            echo "FULL_RELEASE=true" >>$GITHUB_ENV
+          else
+            echo "FULL_RELEASE=false" >>$GITHUB_ENV
+          fi
+
       - name: Test for secrets access
         id: check_secrets
         shell: bash
         run: |
           unset HAS_APPLE_SECRET
           unset HAS_AWS_SECRET
+          unset HAS_GLUE_SECRET
 
           if [ -n "$APPLE_SECRET" ]; then HAS_APPLE_SECRET='true' ; fi
           echo ::set-output name=HAS_APPLE_SECRET::${HAS_APPLE_SECRET}
 
           if [ -n "$AWS_SECRET" ]; then HAS_AWS_SECRET='true' ; fi
           echo ::set-output name=HAS_AWS_SECRET::${HAS_AWS_SECRET}
+
+          if [ -n "$GLUE_ACCESS_TOKEN" ]; then HAS_GLUE_SECRET='true' ; fi
+          echo ::set-output name=HAS_GLUE_SECRET::${HAS_GLUE_SECRET}
         env:
           APPLE_SECRET: "${{ secrets.APPLE_DEV_ID_APP }}"
           AWS_SECRET: "${{ secrets.INSTALLER_UPLOAD_KEY }}"
+          GLUE_ACCESS_TOKEN: "${{ secrets.GLUE_ACCESS_TOKEN }}"
 
       - name: Create installer version number
         id: version_number
@@ -113,6 +133,15 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/madmax/chia_plot"
           chmod +x "$GITHUB_WORKSPACE/madmax/chia_plot_k34"
 
+      - name: Get latest prerelease bladebit plotter
+        if: env.PRE_RELEASE == 'true'
+        run: |
+          PRERELEASE_URL=$(curl -Ls -H "Accept: application/vnd.github+json" "https://api.github.com/repos/Chia-Network/bladebit/releases" | jq -r 'map(select(.prerelease)) | first.assets[] | select(.browser_download_url | endswith("${{ matrix.os.bladebit-suffix }}")).browser_download_url')
+          mkdir "$GITHUB_WORKSPACE/bladebit"
+          wget -O /tmp/bladebit.tar.gz $PRERELEASE_URL
+          tar -xvzf /tmp/bladebit.tar.gz -C $GITHUB_WORKSPACE/bladebit
+          chmod +x "$GITHUB_WORKSPACE/bladebit/bladebit"
+
       - uses: ./.github/actions/install
         with:
           python-version: ${{ matrix.python-version }}
@@ -154,8 +183,8 @@ jobs:
           NOTARIZE: ${{ steps.check_secrets.outputs.HAS_APPLE_SECRET }}
           APPLE_NOTARIZE_USERNAME: "${{ secrets.APPLE_NOTARIZE_USERNAME }}"
           APPLE_NOTARIZE_PASSWORD: "${{ secrets.APPLE_NOTARIZE_PASSWORD }}"
-          MAC_PACKAGE_NAME: "${{ matrix.os.mac-package-name }}"
-          MAC_FILE_SUFFIX: "${{ matrix.os.file-suffix }}"
+          APPLE_DEV_ID_APP: "${{ secrets.APPLE_DEV_ID_APP }}"
+          APPLE_DEV_ID_APP_PASS: "${{ secrets.APPLE_DEV_ID_APP_PASS }}"
         run: |
           cd ./build_scripts
           sh build_macos-2-installer.sh
