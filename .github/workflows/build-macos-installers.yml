@@ -1,6 +1,7 @@
 name: 📦🚀 Build Installers - MacOS
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - 'long_lived/**'
@@ -72,13 +73,13 @@ jobs:
           unset HAS_GLUE_SECRET
 
           if [ -n "$APPLE_SECRET" ]; then HAS_APPLE_SECRET='true' ; fi
-          echo ::set-output name=HAS_APPLE_SECRET::${HAS_APPLE_SECRET}
+          echo HAS_APPLE_SECRET=${HAS_APPLE_SECRET} >> $GITHUB_OUTPUT
 
           if [ -n "$AWS_SECRET" ]; then HAS_AWS_SECRET='true' ; fi
-          echo ::set-output name=HAS_AWS_SECRET::${HAS_AWS_SECRET}
+          echo HAS_AWS_SECRET=${HAS_AWS_SECRET} >> GITHUB_OUTPUT
 
           if [ -n "$GLUE_ACCESS_TOKEN" ]; then HAS_GLUE_SECRET='true' ; fi
-          echo ::set-output name=HAS_GLUE_SECRET::${HAS_GLUE_SECRET}
+          echo HAS_GLUE_SECRET=${HAS_GLUE_SECRET} >> GITHUB_OUTPUT
         env:
           APPLE_SECRET: "${{ secrets.APPLE_DEV_ID_APP }}"
           AWS_SECRET: "${{ secrets.INSTALLER_UPLOAD_KEY }}"
@@ -90,7 +91,7 @@ jobs:
           python3 -m venv ../venv
           . ../venv/bin/activate
           pip install setuptools_scm
-          echo "::set-output name=CHIA_INSTALLER_VERSION::$(python3 ./build_scripts/installer-version.py)"
+          echo "CHIA_INSTALLER_VERSION=$(python3 ./build_scripts/installer-version.py)" >> $GITHUB_OUTPUT
           deactivate
 
       - name: Setup Python environment
@@ -142,6 +143,15 @@ jobs:
           tar -xvzf /tmp/bladebit.tar.gz -C $GITHUB_WORKSPACE/bladebit
           chmod +x "$GITHUB_WORKSPACE/bladebit/bladebit"
 
+      - name: Get latest full release bladebit plotter
+        if: '!github.event.release.prerelease'
+        run: |
+          FULLRELEASE_URL=$(curl -Ls -H "Accept: application/vnd.github+json" "https://api.github.com/repos/Chia-Network/bladebit/releases" | jq -r 'map(select(.prerelease | not)) | first.assets[] | select(.browser_download_url | endswith("${{ matrix.os.bladebit-suffix }}")).browser_download_url')
+          mkdir "$GITHUB_WORKSPACE/bladebit"
+          wget -O /tmp/bladebit.tar.gz $FULLRELEASE_URL
+          tar -xvzf /tmp/bladebit.tar.gz -C $GITHUB_WORKSPACE/bladebit
+          chmod +x "$GITHUB_WORKSPACE/bladebit/bladebit"
+
       - uses: ./.github/actions/install
         with:
           python-version: ${{ matrix.python-version }}
@@ -159,7 +169,7 @@ jobs:
         run: |
           gui_ref=$(git submodule status chia-blockchain-gui | sed -e 's/^ //g' -e 's/ chia-blockchain-gui.*$//g')
           echo "${gui_ref}"
-          echo "::set-output name=GUI_REF::${gui_ref}"
+          echo "GUI_REF=${gui_ref}" >> $GITHUB_OUTPUT
           echo "rm -rf ./chia-blockchain-gui"
           rm -rf ./chia-blockchain-gui
 

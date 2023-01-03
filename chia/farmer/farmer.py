@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import aiohttp
 from blspy import AugSchemeMPL, G1Element, G2Element, PrivateKey
 
-import chia.server.ws_connection as ws  # lgtm [py/import-and-import-from]
 from chia.consensus.constants import ConsensusConstants
 from chia.consensus.pot_iterations import calculate_sp_interval_iters
 from chia.farmer.pooling.og_pool_state import OgPoolState
@@ -337,7 +336,7 @@ class Farmer:
             ErrorResponse(uint16(PoolErrorCode.REQUEST_FAILED.value), error_message).to_json_dict()
         )
 
-    def on_disconnect(self, connection: ws.WSChiaConnection):
+    def on_disconnect(self, connection: WSChiaConnection):
         self.log.info(f"peer disconnected {connection.get_peer_logging()}")
         self.state_changed("close_connection", {})
         if connection.connection_type is NodeType.HARVESTER:
