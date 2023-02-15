@@ -23,6 +23,7 @@ from chia.wallet.did_wallet.did_wallet import DIDWallet
 from chia.wallet.did_wallet.did_wallet_puzzles import create_fullpuz
 from chia.wallet.util.address_type import AddressType
 from chia.wallet.util.wallet_types import WalletType
+from chia.wallet.wallet import CHIP_0002_SIGN_MESSAGE_PREFIX
 from tests.util.wallet_is_synced import wallet_is_synced
 
 
@@ -248,7 +249,7 @@ class TestDIDWallet:
             did_wallet: DIDWallet = await DIDWallet.create_new_did_wallet(
                 wallet_node.wallet_state_manager, wallet, uint64(101)
             )
-        assert did_wallet.wallet_info.name == "Profile 1"
+        assert did_wallet.get_name() == "Profile 1"
         spend_bundle_list = await wallet_node.wallet_state_manager.tx_store.get_unconfirmed_for_wallet(did_wallet.id())
 
         spend_bundle = spend_bundle_list[0].spend_bundle
@@ -315,7 +316,7 @@ class TestDIDWallet:
                 wallet,
                 backup_data,
             )
-        assert did_wallet_4.wallet_info.name == "Profile 2"
+        assert did_wallet_4.get_name() == "Profile 2"
 
         pubkey = (
             await did_wallet_4.wallet_state_manager.get_unused_derivation_record(did_wallet_2.wallet_info.id)
@@ -716,7 +717,7 @@ class TestDIDWallet:
         [True, False],
     )
     @pytest.mark.asyncio
-    async def test_did_transfer(self, two_wallet_nodes, with_recovery, trusted):
+    async def test_did_transfer(self, self_hostname, two_wallet_nodes, with_recovery, trusted):
         num_blocks = 5
         fee = uint64(1000)
         full_nodes, wallets, _ = two_wallet_nodes
@@ -739,8 +740,8 @@ class TestDIDWallet:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
         for i in range(1, num_blocks):
             await full_node_api.farm_new_transaction_block(FarmNewBlockProtocol(ph))
 
@@ -763,7 +764,7 @@ class TestDIDWallet:
                 {"Twitter": "Test", "GitHub": "测试"},
                 fee=fee,
             )
-        assert did_wallet_1.wallet_info.name == "Profile 1"
+        assert did_wallet_1.get_name() == "Profile 1"
         spend_bundle_list = await wallet_node.wallet_state_manager.tx_store.get_unconfirmed_for_wallet(
             did_wallet_1.id()
         )
@@ -815,7 +816,7 @@ class TestDIDWallet:
         [True, False],
     )
     @pytest.mark.asyncio
-    async def test_update_recovery_list(self, two_wallet_nodes, trusted):
+    async def test_update_recovery_list(self, self_hostname, two_wallet_nodes, trusted):
         num_blocks = 5
         full_nodes, wallets, _ = two_wallet_nodes
         full_node_api = full_nodes[0]
@@ -836,8 +837,8 @@ class TestDIDWallet:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
         for i in range(1, num_blocks):
             await full_node_api.farm_new_transaction_block(FarmNewBlockProtocol(ph))
 
@@ -879,7 +880,7 @@ class TestDIDWallet:
         [True, False],
     )
     @pytest.mark.asyncio
-    async def test_get_info(self, two_wallet_nodes, trusted):
+    async def test_get_info(self, self_hostname, two_wallet_nodes, trusted):
         fee = uint64(1000)
         full_nodes, wallets, _ = two_wallet_nodes
         full_node_api = full_nodes[0]
@@ -901,9 +902,9 @@ class TestDIDWallet:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await full_node_api.farm_blocks(count=2, wallet=wallet)
+        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await full_node_api.farm_blocks_to_wallet(count=2, wallet=wallet)
         did_amount = uint64(101)
 
         async with wallet_node.wallet_state_manager.lock:
@@ -961,7 +962,7 @@ class TestDIDWallet:
         [True, False],
     )
     @pytest.mark.asyncio
-    async def test_message_spend(self, two_wallet_nodes, trusted):
+    async def test_message_spend(self, self_hostname, two_wallet_nodes, trusted):
         num_blocks = 3
         fee = uint64(1000)
         full_nodes, wallets, _ = two_wallet_nodes
@@ -985,8 +986,8 @@ class TestDIDWallet:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
         for i in range(1, num_blocks):
             await full_node_api.farm_new_transaction_block(FarmNewBlockProtocol(ph))
 
@@ -1033,7 +1034,7 @@ class TestDIDWallet:
         [True, False],
     )
     @pytest.mark.asyncio
-    async def test_update_metadata(self, two_wallet_nodes, trusted):
+    async def test_update_metadata(self, self_hostname, two_wallet_nodes, trusted):
         fee = uint64(1000)
         full_nodes, wallets, _ = two_wallet_nodes
         full_node_api = full_nodes[0]
@@ -1052,9 +1053,9 @@ class TestDIDWallet:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        expected_confirmed_balance = await full_node_api.farm_blocks(count=2, wallet=wallet)
+        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=2, wallet=wallet)
         did_amount = uint64(101)
 
         async with wallet_node.wallet_state_manager.lock:
@@ -1101,7 +1102,7 @@ class TestDIDWallet:
         [True, False],
     )
     @pytest.mark.asyncio
-    async def test_did_sign_message(self, two_wallet_nodes, trusted):
+    async def test_did_sign_message(self, self_hostname, two_wallet_nodes, trusted):
         num_blocks = 5
         fee = uint64(1000)
         full_nodes, wallets, _ = two_wallet_nodes
@@ -1125,8 +1126,8 @@ class TestDIDWallet:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo("localhost", uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
         for i in range(1, num_blocks):
             await full_node_api.farm_new_transaction_block(FarmNewBlockProtocol(ph))
 
@@ -1149,7 +1150,7 @@ class TestDIDWallet:
                 {"Twitter": "Test", "GitHub": "测试"},
                 fee=fee,
             )
-        assert did_wallet_1.wallet_info.name == "Profile 1"
+        assert did_wallet_1.get_name() == "Profile 1"
         spend_bundle_list = await wallet_node.wallet_state_manager.tx_store.get_unconfirmed_for_wallet(
             did_wallet_1.id()
         )
@@ -1166,7 +1167,7 @@ class TestDIDWallet:
                 "message": message,
             }
         )
-        puzzle: Program = Program.to(("Chia Signed Message", message))
+        puzzle: Program = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, message))
         assert AugSchemeMPL.verify(
             G1Element.from_bytes(bytes.fromhex(response["pubkey"])),
             puzzle.get_tree_hash(),
