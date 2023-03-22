@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-import traceback
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from typing_extensions import Literal
@@ -56,7 +55,7 @@ class TradeManager:
                     "sibling_spends": List[bytes]  # The parent spends for the siblings
                     "sibling_puzzles": List[Program]  # The inner puzzles of the siblings (always OFFER_MOD)
                     "sibling_solutions": List[Program]  # The inner solution of the siblings
-                }
+            }
             )
 
     Wallet:
@@ -135,16 +134,15 @@ class TradeManager:
             return
         if coin_state.spent_height is None:
             self.log.error(f"Coin: {coin_state.coin}, has not been spent so trade can remain valid")
-
         # Then let's filter the offer into coins that WE offered
         offer = Offer.from_bytes(trade.offer)
-        primary_coin_ids = [c.name() for c in offer.bundle.removals()]
+        primary_coin_ids = [c.name() for c in offer.removals()]
         our_coin_records: List[WalletCoinRecord] = await self.wallet_state_manager.coin_store.get_multiple_coin_records(
             primary_coin_ids
         )
         our_primary_coins: List[Coin] = [cr.coin for cr in our_coin_records]
         our_additions: List[Coin] = list(
-            filter(lambda c: offer.get_root_removal(c) in our_primary_coins, offer.bundle.additions())
+            filter(lambda c: offer.get_root_removal(c) in our_primary_coins, offer.additions())
         )
         our_addition_ids: List[bytes32] = [c.name() for c in our_additions]
 
@@ -156,7 +154,6 @@ class TradeManager:
         )
         assert coin_states is not None
         coin_state_names: List[bytes32] = [cs.coin.name() for cs in coin_states]
-
         # If any of our settlement_payments were spent, this offer was a success!
         if set(our_addition_ids) == set(coin_state_names):
             height = coin_states[0].created_height
@@ -212,6 +209,10 @@ class TradeManager:
     async def cancel_pending_offer(self, trade_id: bytes32) -> None:
         await self.trade_store.set_status(trade_id, TradeStatus.CANCELLED)
         self.wallet_state_manager.state_changed("offer_cancelled")
+
+    async def fail_pending_offer(self, trade_id: bytes32) -> None:
+        await self.trade_store.set_status(trade_id, TradeStatus.FAILED)
+        self.wallet_state_manager.state_changed("offer_failed")
 
     async def cancel_pending_offer_safely(
         self, trade_id: bytes32, fee: uint64 = uint64(0)
@@ -382,8 +383,8 @@ class TradeManager:
                 await self.trade_store.set_status(trade.trade_id, TradeStatus.CANCELLED)
         return all_txs
 
-    async def save_trade(self, trade: TradeRecord) -> None:
-        await self.trade_store.add_trade_record(trade)
+    async def save_trade(self, trade: TradeRecord, offer_name: bytes32) -> None:
+        await self.trade_store.add_trade_record(trade, offer_name)
         self.wallet_state_manager.state_changed("offer_added")
 
     async def create_offer_for_ids(
@@ -395,13 +396,20 @@ class TradeManager:
         validate_only: bool = False,
         min_coin_amount: Optional[uint64] = None,
         max_coin_amount: Optional[uint64] = None,
+        reuse_puzhash: Optional[bool] = None,
     ) -> Union[Tuple[Literal[True], TradeRecord, None], Tuple[Literal[False], None, str]]:
         if driver_dict is None:
             driver_dict = {}
         if solver is None:
             solver = Solver({})
         result = await self._create_offer_for_ids(
-            offer, driver_dict, solver, fee=fee, min_coin_amount=min_coin_amount, max_coin_amount=max_coin_amount
+            offer,
+            driver_dict,
+            solver,
+            fee=fee,
+            min_coin_amount=min_coin_amount,
+            max_coin_amount=max_coin_amount,
+            reuse_puzhash=reuse_puzhash,
         )
         if not result[0] or result[1] is None:
             raise Exception(f"Error creating offer: {result[2]}")
@@ -424,7 +432,7 @@ class TradeManager:
         )
 
         if success is True and trade_offer is not None and not validate_only:
-            await self.save_trade(trade_offer)
+            await self.save_trade(trade_offer, created_offer.name())
 
         return success, trade_offer, error
 
@@ -437,6 +445,7 @@ class TradeManager:
         min_coin_amount: Optional[uint64] = None,
         max_coin_amount: Optional[uint64] = None,
         old: bool = False,
+        reuse_puzhash: Optional[bool] = None,
     ) -> Union[Tuple[Literal[True], Offer, None], Tuple[Literal[False], None, str]]:
         """
         Offer is dictionary of wallet ids and amount
@@ -445,6 +454,14 @@ class TradeManager:
             driver_dict = {}
         if solver is None:
             solver = Solver({})
+        if reuse_puzhash is None:
+            reuse_puzhash_config = self.wallet_state_manager.config.get("reuse_public_key_for_change", None)
+            if reuse_puzhash_config is None:
+                reuse_puzhash = False
+            else:
+                reuse_puzhash = reuse_puzhash_config.get(
+                    str(self.wallet_state_manager.wallet_node.logged_in_fingerprint), False
+                )
         try:
             coins_to_offer: Dict[Union[int, bytes32], List[Coin]] = {}
             requested_payments: Dict[Optional[bytes32], List[Payment]] = {}
@@ -459,7 +476,7 @@ class TradeManager:
                     if isinstance(id, int):
                         wallet_id = uint32(id)
                         wallet = self.wallet_state_manager.wallets[wallet_id]
-                        p2_ph: bytes32 = await wallet.get_new_puzzlehash()
+                        p2_ph: bytes32 = await wallet.get_puzzle_hash(new=not reuse_puzhash)
                         if wallet.type() != WalletType.STANDARD_WALLET:
                             if callable(getattr(wallet, "get_asset_id", None)):  # ATTENTION: new wallets
                                 asset_id = bytes32(bytes.fromhex(wallet.get_asset_id()))
@@ -469,7 +486,7 @@ class TradeManager:
                                     f"Cannot request assets from wallet id {wallet.id()} without more information"
                                 )
                     else:
-                        p2_ph = await self.wallet_state_manager.main_wallet.get_new_puzzlehash()
+                        p2_ph = await self.wallet_state_manager.main_wallet.get_puzzle_hash(new=not reuse_puzhash)
                         asset_id = id
                         wallet = await self.wallet_state_manager.get_wallet_for_asset_id(asset_id.hex())
                         memos = [p2_ph]
@@ -544,6 +561,7 @@ class TradeManager:
                         fee=fee_left_to_pay,
                         coins=set(selected_coins),
                         puzzle_announcements_to_consume=announcements_to_assert,
+                        reuse_puzhash=reuse_puzhash,
                     )
                     all_transactions.append(tx)
                 elif wallet.type() == WalletType.NFT:
@@ -557,6 +575,7 @@ class TradeManager:
                         fee=fee_left_to_pay,
                         coins=set(selected_coins),
                         puzzle_announcements_to_consume=announcements_to_assert,
+                        reuse_puzhash=reuse_puzhash,
                     )
                     all_transactions.extend(txs)
                 else:
@@ -567,6 +586,7 @@ class TradeManager:
                         fee=fee_left_to_pay,
                         coins=set(selected_coins),
                         puzzle_announcements_to_consume=announcements_to_assert,
+                        reuse_puzhash=reuse_puzhash,
                     )
                     all_transactions.extend(txs)
 
@@ -580,12 +600,10 @@ class TradeManager:
             return True, offer, None
 
         except Exception as e:
-            tb = traceback.format_exc()
-            self.log.error(f"Error with creating trade offer: {type(e)}{tb}")
+            self.log.exception("Error creating trade offer")
             return False, None, str(e)
 
     async def maybe_create_wallets_for_offer(self, offer: Offer) -> None:
-
         for key in offer.arbitrage():
             wsm = self.wallet_state_manager
             if key is None:
@@ -596,7 +614,7 @@ class TradeManager:
                 await wsm.create_wallet_for_puzzle_info(offer.driver_dict[key])
 
     async def check_offer_validity(self, offer: Offer, peer: WSChiaConnection) -> bool:
-        all_removals: List[Coin] = offer.bundle.removals()
+        all_removals: List[Coin] = offer.removals()
         all_removal_names: List[bytes32] = [c.name() for c in all_removals]
         non_ephemeral_removals: List[Coin] = list(
             filter(lambda c: c.parent_coin_info not in all_removal_names, all_removals)
@@ -604,13 +622,14 @@ class TradeManager:
         coin_states = await self.wallet_state_manager.wallet_node.get_coin_state(
             [c.name() for c in non_ephemeral_removals], peer=peer
         )
+
         return len(coin_states) == len(non_ephemeral_removals) and all([cs.spent_height is None for cs in coin_states])
 
     async def calculate_tx_records_for_offer(self, offer: Offer, validate: bool) -> List[TransactionRecord]:
         if validate:
             final_spend_bundle: SpendBundle = offer.to_valid_spend()
         else:
-            final_spend_bundle = offer.bundle
+            final_spend_bundle = offer._bundle
 
         settlement_coins: List[Coin] = [c for coins in offer.get_offered_coins().values() for c in coins]
         settlement_coin_ids: List[bytes32] = [c.name() for c in settlement_coins]
@@ -704,6 +723,7 @@ class TradeManager:
         fee: uint64 = uint64(0),
         min_coin_amount: Optional[uint64] = None,
         max_coin_amount: Optional[uint64] = None,
+        reuse_puzhash: Optional[bool] = None,
     ) -> Tuple[TradeRecord, List[TransactionRecord]]:
         if solver is None:
             solver = Solver({})
@@ -737,6 +757,7 @@ class TradeManager:
             min_coin_amount=min_coin_amount,
             max_coin_amount=max_coin_amount,
             old=offer.old,
+            reuse_puzhash=reuse_puzhash,
         )
         if not result[0] or result[1] is None:
             raise ValueError(result[2])
@@ -744,7 +765,7 @@ class TradeManager:
         success, take_offer, error = result
 
         complete_offer = await self.check_for_final_modifications(Offer.aggregate([offer, take_offer]), solver)
-        self.log.info(f"COMPLETE OFFER: {complete_offer.to_bech32()}")
+        self.log.info("COMPLETE OFFER: %s", complete_offer.to_bech32())
         assert complete_offer.is_valid()
         final_spend_bundle: SpendBundle = complete_offer.to_valid_spend()
         await self.maybe_create_wallets_for_offer(complete_offer)
@@ -765,7 +786,7 @@ class TradeManager:
             sent_to=[],
         )
 
-        await self.save_trade(trade_record)
+        await self.save_trade(trade_record, offer.name())
 
         # Dummy transaction for the sake of the wallet push
         push_tx = TransactionRecord(
@@ -860,7 +881,7 @@ class TradeManager:
                 return await DataLayerWallet.get_offer_summary(offer)
         # Otherwise just return the same thing as the RPC normally does
         offered, requested, infos = offer.summary()
-        return {"offered": offered, "requested": requested, "fees": offer.bundle.fees(), "infos": infos}
+        return {"offered": offered, "requested": requested, "fees": offer.fees(), "infos": infos}
 
     async def check_for_final_modifications(self, offer: Offer, solver: Solver) -> Offer:
         for puzzle_info in offer.driver_dict.values():

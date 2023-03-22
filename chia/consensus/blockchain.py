@@ -32,7 +32,7 @@ from chia.full_node.coin_store import CoinStore
 from chia.full_node.mempool_check_conditions import get_name_puzzle_conditions
 from chia.types.block_protocol import BlockInfo
 from chia.types.blockchain_format.coin import Coin
-from chia.types.blockchain_format.program import SerializedProgram
+from chia.types.blockchain_format.serialized_program import SerializedProgram
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.blockchain_format.sub_epoch_summary import SubEpochSummary
 from chia.types.blockchain_format.vdf import VDFInfo
@@ -428,7 +428,6 @@ class Blockchain(BlockchainInterface):
     async def get_tx_removals_and_additions(
         self, block: FullBlock, npc_result: Optional[NPCResult] = None
     ) -> Tuple[List[bytes32], List[Coin], Optional[NPCResult]]:
-
         if not block.is_transaction_block():
             return [], [], None
 
@@ -540,6 +539,9 @@ class Blockchain(BlockchainInterface):
     async def validate_unfinished_block_header(
         self, block: UnfinishedBlock, skip_overflow_ss_validation: bool = True
     ) -> Tuple[Optional[uint64], Optional[Err]]:
+        if len(block.transactions_generator_ref_list) > self.constants.MAX_GENERATOR_REF_LIST_SIZE:
+            return None, Err.TOO_MANY_GENERATOR_REFS
+
         if (
             not self.contains_block(block.prev_header_hash)
             and block.prev_header_hash != self.constants.GENESIS_CHALLENGE

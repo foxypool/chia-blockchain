@@ -4,7 +4,7 @@ from setuptools_scm import get_version
 
 
 # example: 1.0b5.dev225
-def main():
+def main() -> None:
 
     print("1.7.0+og-1.2.0")
     return

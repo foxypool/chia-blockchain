@@ -5,7 +5,8 @@ from typing import Dict, List, Optional, Tuple
 from clvm.casts import int_from_bytes
 
 from chia.types.blockchain_format.coin import Coin
-from chia.types.blockchain_format.program import Program, SerializedProgram
+from chia.types.blockchain_format.program import Program
+from chia.types.blockchain_format.serialized_program import SerializedProgram
 from chia.types.blockchain_format.sized_bytes import bytes32, bytes48
 from chia.types.condition_opcodes import ConditionOpcode
 from chia.types.condition_with_args import ConditionWithArgs
@@ -24,12 +25,28 @@ def parse_sexp_to_condition(
     Takes a ChiaLisp sexp and returns a ConditionWithArgs.
     If it fails, returns an Error
     """
-    as_atoms = sexp.as_atom_list()
-    if len(as_atoms) < 1:
+    first = sexp.pair
+    if first is None:
         return Err.INVALID_CONDITION, None
-    opcode = as_atoms[0]
-    opcode = ConditionOpcode(opcode)
-    return None, ConditionWithArgs(opcode, as_atoms[1:])
+    op = first[0].atom
+    if op is None or len(op) != 1:
+        return Err.INVALID_CONDITION, None
+
+    # since the ConditionWithArgs only has atoms as the args, we can't parse
+    # hints and memos with this function. We just exit the loop if we encounter
+    # a pair instead of an atom
+    vars: List[bytes] = []
+    for arg in Program(first[1]).as_iter():
+        a = arg.atom
+        if a is None:
+            break
+        vars.append(a)
+        # no condition (currently) has more than 3 arguments. Additional
+        # arguments are allowed but ignored
+        if len(vars) > 3:
+            break
+
+    return None, ConditionWithArgs(ConditionOpcode(op), vars)
 
 
 def parse_sexp_to_conditions(
