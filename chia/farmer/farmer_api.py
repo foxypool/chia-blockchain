@@ -614,7 +614,8 @@ class FarmerAPI:
             new_proof_of_space.proof,
             new_proof_of_space.sp_hash,
             is_eos,
-            self.farmer.pool_payout_address
+            self.farmer.pool_payout_address,
+            peer.peer_node_id,
         )
 
         # The plot key is 2/2 so we need the harvester's half of the signature

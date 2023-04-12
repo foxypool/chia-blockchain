@@ -14,6 +14,7 @@ class PartialPayload(Streamable):
     sp_hash: bytes32
     end_of_sub_slot: bool
     payout_address: str  # The farmer can choose where to send the rewards. This can take a few minutes
+    harvester_id: bytes32
 
 
 @streamable
