@@ -249,22 +249,22 @@ class Farmer:
 
     async def initialize_pooling(self):
         self.log.debug(f"Connecting to OG pool {self.pool_url} ..")
-        pool_info: Dict = {}
-        has_pool_info = False
-        while not has_pool_info:
+        is_connected_to_og_pool = False
+        while not is_connected_to_og_pool:
             try:
                 pool_info = await self.pool_api_client.get_pool_info()
-                has_pool_info = True
+                self._update_local_pool_info(pool_info)
+                pool_name = pool_info["name"]
+                self.log.info(f"Connected to OG pool {pool_name} ({self.pool_url}) using payout address {self.pool_payout_address}")
+                is_connected_to_og_pool = True
             except asyncio.TimeoutError:
                 self.log.error(f"Timed out while retrieving OG pool info")
                 await sleep(5)
             except Exception as e:
-                self.log.error(f"Error retrieving OG pool info: {e}")
+                tb = traceback.format_exc()
+                self.log.error(f"Error connecting to the OG pool: {e} {tb}")
                 await sleep(5)
 
-        pool_name = pool_info["name"]
-        self.log.info(f"Connected to OG pool {pool_name} ({self.pool_url}) using payout address {self.pool_payout_address}")
-        self._update_local_pool_info(pool_info)
         self.og_pool_state.difficulty = self.pool_minimum_difficulty
 
     async def _update_og_pool_info(self):
@@ -282,8 +282,11 @@ class Farmer:
         self.log.info(f"Updated the OG pool_info successfully")
 
     def _update_local_pool_info(self, pool_info: Dict):
+        assert pool_info.get("var_diff_target_in_seconds") is not None
         self.pool_var_diff_target_in_seconds = pool_info["var_diff_target_in_seconds"]
+        assert pool_info.get("minimum_difficulty") is not None
         self.pool_minimum_difficulty = uint64(pool_info["minimum_difficulty"])
+        assert pool_info.get("target_puzzle_hash") is not None
         pool_target = bytes32.fromhex(pool_info["target_puzzle_hash"][2:])
         assert len(pool_target) == 32
         self.pool_reward_target = pool_target
@@ -876,4 +879,8 @@ class Farmer:
             if time_slept < 60 * 60:
                 continue
             time_slept = 0
-            await self._update_og_pool_info()
+            try:
+                await self._update_og_pool_info()
+            except Exception as e:
+                tb = traceback.format_exc()
+                self.log.error(f"Exception in update_og_pool_info, {e} {tb}")
