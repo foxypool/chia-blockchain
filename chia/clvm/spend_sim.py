@@ -65,7 +65,7 @@ class CostLogger:
     def add_cost(self, descriptor: str, spend_bundle: SpendBundle) -> SpendBundle:
         program: BlockGenerator = simple_solution_generator(spend_bundle)
         npc_result: NPCResult = get_name_puzzle_conditions(
-            program, INFINITE_COST, cost_per_byte=DEFAULT_CONSTANTS.COST_PER_BYTE, mempool_mode=True
+            program, INFINITE_COST, mempool_mode=True, height=DEFAULT_CONSTANTS.SOFT_FORK2_HEIGHT
         )
         self.cost_dict[descriptor] = npc_result.cost
         cost_to_subtract: int = 0
@@ -254,13 +254,13 @@ class SpendSim:
                 result = self.mempool_manager.create_bundle_from_mempool(peak.header_hash, item_inclusion_filter)
 
                 if result is not None:
-                    bundle, additions, removals = result
+                    bundle, additions = result
                     generator_bundle = bundle
                     return_additions = additions
-                    return_removals = removals
+                    return_removals = bundle.removals()
 
                     await self.coin_store._add_coin_records([self.new_coin_record(addition) for addition in additions])
-                    await self.coin_store._set_spent([r.name() for r in removals], uint32(self.block_height + 1))
+                    await self.coin_store._set_spent([r.name() for r in return_removals], uint32(self.block_height + 1))
 
         # SimBlockRecord is created
         generator: Optional[BlockGenerator] = await self.generate_transaction_generator(generator_bundle)

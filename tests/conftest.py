@@ -124,17 +124,17 @@ async def empty_blockchain(request):
 
 
 @pytest.fixture(scope="function")
-def latest_db_version():
+def latest_db_version() -> int:
     return 2
 
 
 @pytest.fixture(scope="function", params=[1, 2])
-def db_version(request):
+def db_version(request) -> int:
     return request.param
 
 
-@pytest.fixture(scope="function", params=[1000000, 3630000, 3830000])
-def softfork_height(request):
+@pytest.fixture(scope="function", params=[1000000, 3630000, 4000000])
+def softfork_height(request) -> int:
     return request.param
 
 
@@ -457,8 +457,7 @@ async def one_node() -> AsyncIterator[Tuple[List[Service], List[FullNodeSimulato
         yield _
 
 
-# soft-fork 2 is disabled (for now)
-@pytest.fixture(scope="function", params=[False])
+@pytest.fixture(scope="function", params=[True, False])
 def enable_softfork2(request):
     return request.param
 
