@@ -27,6 +27,8 @@ jobs:
     name: Windows 10 Installer
     runs-on: [windows-2019]
     timeout-minutes: 50
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -216,6 +218,22 @@ jobs:
       run: |
          certutil.exe -hashfile ${{ github.workspace }}\chia-blockchain-gui\release-builds\windows-installer\ChiaSetup-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}.exe SHA256 > ${{ github.workspace }}\chia-blockchain-gui\release-builds\windows-installer\ChiaSetup-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}.exe.sha256
          ls ${{ github.workspace }}\chia-blockchain-gui\release-builds\windows-installer\
+
+    - name: Get tag name
+      if: startsWith(github.ref, 'refs/tags/')
+      id: tag-name
+      shell: bash
+      run: |
+        echo "TAG_NAME=$(echo ${{ github.ref }} | cut -d'/' -f 3)" >>$GITHUB_OUTPUT
+        echo "REPO_NAME=$(echo ${{ github.repository }} | cut -d'/' -f 2)" >>$GITHUB_OUTPUT
+
+    - name: Upload release artifacts
+      if: env.RELEASE == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        CHIA_INSTALLER_VERSION: ${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}
+      run: |
+        gh release upload $env:RELEASE_TAG ${{ github.workspace }}\chia-blockchain-gui\release-builds\windows-installer\ChiaSetup-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}.exe
 
     - name: Remove Windows exe and installer to exclude from cache
       run: |
