@@ -10,13 +10,17 @@ from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.coin_record import CoinRecord
+from chia.util.bech32m import encode_puzzle_hash
 from chia.util.ints import uint16, uint32, uint64
 from chia.wallet.notification_store import Notification
 from chia.wallet.trade_record import TradeRecord
 from chia.wallet.trading.offer import Offer
 from chia.wallet.transaction_record import TransactionRecord
 from chia.wallet.transaction_sorting import SortKey
+from chia.wallet.util.query_filter import TransactionTypeFilter
 from chia.wallet.util.wallet_types import WalletType
+from chia.wallet.vc_wallet.vc_store import VCRecord
+from chia.wallet.wallet_coin_store import GetCoinRecords
 
 
 def parse_result_transactions(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -111,6 +115,9 @@ class WalletRpcClient(RpcClient):
     async def get_wallet_balance(self, wallet_id: int) -> Dict:
         return (await self.fetch("get_wallet_balance", {"wallet_id": wallet_id}))["wallet_balance"]
 
+    async def get_wallet_balances(self, wallet_ids: Optional[List[int]] = None) -> Dict:
+        return (await self.fetch("get_wallet_balances", {"wallet_ids": wallet_ids}))["wallet_balances"]
+
     async def get_transaction(self, wallet_id: int, transaction_id: bytes32) -> TransactionRecord:
         res = await self.fetch(
             "get_transaction",
@@ -126,6 +133,8 @@ class WalletRpcClient(RpcClient):
         sort_key: SortKey = None,
         reverse: bool = False,
         to_address: Optional[str] = None,
+        type_filter: Optional[TransactionTypeFilter] = None,
+        confirmed: Optional[bool] = None,
     ) -> List[TransactionRecord]:
         request: Dict[str, Any] = {"wallet_id": wallet_id}
 
@@ -140,6 +149,12 @@ class WalletRpcClient(RpcClient):
         if to_address is not None:
             request["to_address"] = to_address
 
+        if type_filter is not None:
+            request["type_filter"] = type_filter.to_json_dict()
+
+        if confirmed is not None:
+            request["confirmed"] = confirmed
+
         res = await self.fetch(
             "get_transactions",
             request,
@@ -149,11 +164,16 @@ class WalletRpcClient(RpcClient):
     async def get_transaction_count(
         self,
         wallet_id: int,
+        confirmed: Optional[bool] = None,
+        type_filter: Optional[TransactionTypeFilter] = None,
     ) -> List[TransactionRecord]:
-        res = await self.fetch(
-            "get_transaction_count",
-            {"wallet_id": wallet_id},
-        )
+        request: Dict[str, Any] = {"wallet_id": wallet_id}
+        if type_filter is not None:
+            request["type_filter"] = type_filter.to_json_dict()
+
+        if confirmed is not None:
+            request["confirmed"] = confirmed
+        res = await self.fetch("get_transaction_count", request)
         return res["count"]
 
     async def get_next_address(self, wallet_id: int, new_address: bool) -> str:
@@ -170,6 +190,7 @@ class WalletRpcClient(RpcClient):
         max_coin_amount: uint64 = uint64(0),
         exclude_amounts: Optional[List[uint64]] = None,
         exclude_coin_ids: Optional[List[str]] = None,
+        puzzle_decorator_override: Optional[List[Dict[str, Union[str, int, bool]]]] = None,
         reuse_puzhash: Optional[bool] = None,
     ) -> TransactionRecord:
         if memos is None:
@@ -182,6 +203,7 @@ class WalletRpcClient(RpcClient):
                 "max_coin_amount": max_coin_amount,
                 "exclude_coin_amounts": exclude_amounts,
                 "exclude_coin_ids": exclude_coin_ids,
+                "puzzle_decorator": puzzle_decorator_override,
                 "reuse_puzhash": reuse_puzhash,
             }
         else:
@@ -195,6 +217,7 @@ class WalletRpcClient(RpcClient):
                 "max_coin_amount": max_coin_amount,
                 "exclude_coin_amounts": exclude_amounts,
                 "exclude_coin_ids": exclude_coin_ids,
+                "puzzle_decorator": puzzle_decorator_override,
                 "reuse_puzhash": reuse_puzhash,
             }
         res = await self.fetch("send_transaction", send_dict)
@@ -221,6 +244,17 @@ class WalletRpcClient(RpcClient):
             )
 
         return TransactionRecord.from_json_dict_convenience(response["transaction"])
+
+    async def spend_clawback_coins(
+        self,
+        coin_ids: List[bytes32],
+        fee: int = 0,
+    ) -> Dict:
+        response = await self.fetch(
+            "spend_clawback_coins",
+            {"coin_ids": [cid.hex() for cid in coin_ids], "fee": fee},
+        )
+        return response
 
     async def delete_unconfirmed_transactions(self, wallet_id: int) -> None:
         await self.fetch(
@@ -348,6 +382,9 @@ class WalletRpcClient(RpcClient):
         response: Dict[str, List[Dict]] = await self.fetch("select_coins", request)
         return [Coin.from_json_dict(coin) for coin in response["coins"]]
 
+    async def get_coin_records(self, request: GetCoinRecords) -> Dict[str, Any]:
+        return await self.fetch("get_coin_records", request.to_json_dict())
+
     async def get_spendable_coins(
         self,
         wallet_id: int,
@@ -421,6 +458,14 @@ class WalletRpcClient(RpcClient):
         response = await self.fetch("did_get_did", request)
         return response
 
+    async def get_did_info(self, coin_id: str, latest: bool) -> Dict:
+        request: Dict[str, Any] = {
+            "coin_id": coin_id,
+            "latest": latest,
+        }
+        response = await self.fetch("did_get_info", request)
+        return response
+
     async def create_did_backup_file(self, wallet_id: int, filename: str) -> Dict:
         request: Dict[str, Any] = {
             "wallet_id": wallet_id,
@@ -452,6 +497,17 @@ class WalletRpcClient(RpcClient):
         response = await self.fetch("did_get_recovery_list", request)
         return response
 
+    async def did_message_spend(
+        self, wallet_id: int, puzzle_announcements: List[str], coin_announcements: List[str]
+    ) -> Dict:
+        request: Dict[str, Any] = {
+            "wallet_id": wallet_id,
+            "coin_announcements": coin_announcements,
+            "puzzle_announcements": puzzle_announcements,
+        }
+        response = await self.fetch("did_message_spend", request)
+        return response
+
     async def update_did_metadata(
         self,
         wallet_id: int,
@@ -471,6 +527,21 @@ class WalletRpcClient(RpcClient):
             "wallet_id": wallet_id,
         }
         response = await self.fetch("did_get_metadata", request)
+        return response
+
+    async def find_lost_did(
+        self, coin_id: str, recovery_list_hash: Optional[str], metadata: Optional[Dict], num_verification: Optional[int]
+    ) -> Dict:
+        request: Dict[str, Any] = {
+            "coin_id": coin_id,
+        }
+        if recovery_list_hash is not None:
+            request["recovery_list_hash"] = recovery_list_hash
+        if metadata is not None:
+            request["metadata"] = (metadata,)
+        if num_verification is not None:
+            request["num_verification"] = num_verification
+        response = await self.fetch("did_find_lost_did", request)
         return response
 
     async def create_new_did_wallet_from_recovery(self, filename: str) -> Dict:
@@ -1125,3 +1196,68 @@ class WalletRpcClient(RpcClient):
     async def sign_message_by_id(self, id: str, message: str) -> Tuple[str, str, str]:
         response = await self.fetch("sign_message_by_id", {"id": id, "message": message})
         return response["pubkey"], response["signature"], response["signing_mode"]
+
+    async def vc_mint(
+        self, did_id: bytes32, target_address: Optional[bytes32] = None, fee: uint64 = uint64(0)
+    ) -> Tuple[VCRecord, List[TransactionRecord]]:
+        response = await self.fetch(
+            "vc_mint",
+            {
+                "did_id": encode_puzzle_hash(did_id, "rpc"),
+                "target_address": encode_puzzle_hash(target_address, "rpc") if target_address is not None else None,
+                "fee": fee,
+            },
+        )
+        return VCRecord.from_json_dict(response["vc_record"]), [
+            TransactionRecord.from_json_dict_convenience(tx) for tx in response["transactions"]
+        ]
+
+    async def vc_get(self, vc_id: bytes32) -> Optional[VCRecord]:
+        response = await self.fetch("vc_get", {"vc_id": vc_id.hex()})
+        return None if response["vc_record"] is None else VCRecord.from_json_dict(response["vc_record"])
+
+    async def vc_get_list(self, start: int = 0, count: int = 50) -> Tuple[List[VCRecord], Dict[str, Any]]:
+        response = await self.fetch("vc_get_list", {"start": start, "count": count})
+        return [VCRecord.from_json_dict(rec) for rec in response["vc_records"]], response["proofs"]
+
+    async def vc_spend(
+        self,
+        vc_id: bytes32,
+        new_puzhash: Optional[bytes32] = None,
+        new_proof_hash: Optional[bytes32] = None,
+        provider_inner_puzhash: Optional[bytes32] = None,
+        fee: uint64 = uint64(0),
+        reuse_puzhash: Optional[bool] = None,
+    ) -> List[TransactionRecord]:
+        response = await self.fetch(
+            "vc_spend",
+            {
+                "vc_id": vc_id.hex(),
+                "new_puzhash": new_puzhash.hex() if new_puzhash is not None else new_puzhash,
+                "new_proof_hash": new_proof_hash.hex() if new_proof_hash is not None else new_proof_hash,
+                "provider_inner_puzhash": provider_inner_puzhash.hex()
+                if provider_inner_puzhash is not None
+                else provider_inner_puzhash,
+                "fee": fee,
+                "reuse_puzhash": reuse_puzhash,
+            },
+        )
+        return [TransactionRecord.from_json_dict_convenience(tx) for tx in response["transactions"]]
+
+    async def vc_add_proofs(self, proofs: Dict[str, Any]) -> None:
+        await self.fetch("vc_add_proofs", {"proofs": proofs})
+
+    async def vc_get_proofs_for_root(self, root: bytes32) -> Dict[str, Any]:
+        response = await self.fetch("vc_get_proofs_for_root", {"root": root.hex()})
+        return response["proofs"]
+
+    async def vc_revoke(
+        self,
+        vc_parent_id: bytes32,
+        fee: uint64 = uint64(0),
+        reuse_puzhash: Optional[bool] = None,
+    ) -> List[TransactionRecord]:
+        response = await self.fetch(
+            "vc_revoke", {"vc_parent_id": vc_parent_id.hex(), "fee": fee, "reuse_puzhash": reuse_puzhash}
+        )
+        return [TransactionRecord.from_json_dict_convenience(tx) for tx in response["transactions"]]

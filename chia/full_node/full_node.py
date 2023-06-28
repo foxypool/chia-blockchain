@@ -1078,12 +1078,10 @@ class FullNode:
                     fetched = False
                     for peer in random.sample(new_peers_with_peak, len(new_peers_with_peak)):
                         if peer.closed:
-                            peers_with_peak.remove(peer)
                             continue
                         response = await peer.call_api(FullNodeAPI.request_blocks, request, timeout=30)
                         if response is None:
                             await peer.close()
-                            peers_with_peak.remove(peer)
                         elif isinstance(response, RespondBlocks):
                             await batch_queue.put((peer, response.blocks))
                             fetched = True
@@ -1116,8 +1114,6 @@ class FullNode:
                     blocks, peer, None if advanced_peak else uint32(fork_point_height), summaries
                 )
                 if success is False:
-                    if peer in peers_with_peak:
-                        peers_with_peak.remove(peer)
                     await peer.close(600)
                     raise ValueError(f"Failed to validate block batch {start_height} to {end_height}")
                 self.log.info(f"Added blocks {start_height} to {end_height}")
@@ -1459,6 +1455,8 @@ class FullNode:
             sub_slots[1],
             fork_block,
             self.blockchain,
+            sub_slot_iters,
+            difficulty,
         )
 
         if fns_peak_result.new_signage_points is not None and peer is not None:
@@ -1883,11 +1881,7 @@ class FullNode:
             # blockchain.run_generator throws on errors, so npc_result is
             # guaranteed to represent a successful run
             assert npc_result.conds is not None
-            pairs_pks, pairs_msgs = pkm_pairs(
-                npc_result.conds,
-                self.constants.AGG_SIG_ME_ADDITIONAL_DATA,
-                soft_fork=height >= self.constants.SOFT_FORK_HEIGHT,
-            )
+            pairs_pks, pairs_msgs = pkm_pairs(npc_result.conds, self.constants.AGG_SIG_ME_ADDITIONAL_DATA)
             if not cached_bls.aggregate_verify(
                 pairs_pks, pairs_msgs, block.transactions_info.aggregated_signature, True
             ):
@@ -2146,6 +2140,8 @@ class FullNode:
                 end_of_slot_bundle,
                 self.blockchain,
                 peak,
+                next_sub_slot_iters,
+                next_difficulty,
                 await self.blockchain.get_full_peak(),
             )
             # It may be an empty list, even if it's not None. Not None means added successfully
