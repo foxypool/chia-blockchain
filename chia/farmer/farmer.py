@@ -6,6 +6,7 @@ import logging
 import time
 import traceback
 from math import floor
+from asyncio import sleep
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -13,6 +14,9 @@ import aiohttp
 from blspy import AugSchemeMPL, G1Element, G2Element, PrivateKey
 
 from chia.consensus.constants import ConsensusConstants
+from chia.consensus.pot_iterations import calculate_sp_interval_iters
+from chia.farmer.pooling.og_pool_state import OgPoolState
+from chia.farmer.pooling.pool_api_client import PoolApiClient
 from chia.daemon.keychain_proxy import KeychainProxy, connect_to_keychain_and_validate, wrap_local_keychain
 from chia.plot_sync.delta import Delta
 from chia.plot_sync.receiver import Receiver
@@ -37,7 +41,7 @@ from chia.server.ws_connection import WSChiaConnection
 from chia.ssl.create_ssl import get_mozilla_ca_crt
 from chia.types.blockchain_format.proof_of_space import ProofOfSpace
 from chia.types.blockchain_format.sized_bytes import bytes32
-from chia.util.bech32m import decode_puzzle_hash
+from chia.util.bech32m import decode_puzzle_hash, encode_puzzle_hash
 from chia.util.byte_types import hexstr_to_bytes
 from chia.util.config import config_path_for_filename, load_config, lock_and_load_config, save_config
 from chia.util.errors import KeychainProxyConnectionFailure
@@ -72,6 +76,8 @@ def strip_old_entries(pairs: List[Tuple[uint32, Any]], before: float) -> List[Tu
                 return pairs[index:]
     return []
 
+
+DEFAULT_OG_POOL_URL: str = "https://farmer.chia-og.foxypool.io"
 
 """
 HARVESTER PROTOCOL (FARMER <-> HARVESTER)
@@ -137,6 +143,21 @@ class Farmer:
         # Use to find missing signage points. (new_signage_point, time)
         self.prev_signage_point: Optional[Tuple[uint64, farmer_protocol.NewSignagePoint]] = None
 
+        # OG Pooling properties
+        self.pool_url = None
+        self.pool_payout_address = None
+        self.is_og_pooling_disabled = False
+        self.pool_sub_slot_iters = None
+        self.iters_limit = None
+        self.pool_minimum_difficulty = None
+        self.og_pool_state = None
+        self.pool_var_diff_target_in_seconds = None
+        self.pool_reward_target = None
+        self.adjust_pool_difficulty_task: Optional[asyncio.Task] = None
+        self.check_pool_reward_target_task: Optional[asyncio.Task] = None
+        self.update_og_pool_info_task: Optional[asyncio.Task] = None
+        self.pool_api_client = None
+
     def get_connections(self, request_node_type: Optional[NodeType]) -> List[Dict[str, Any]]:
         return default_get_connections(server=self.server, request_node_type=request_node_type)
 
@@ -195,7 +216,20 @@ class Farmer:
             log.warning(no_keys_error_str)
             return False
 
+        # OG Pooling setup
+        self.pool_url = self.config.get("pool_url", DEFAULT_OG_POOL_URL)
+        self.pool_payout_address = self.config.get("pool_payout_address", self.farmer_target_encoded)
+        self.is_og_pooling_disabled = self.config.get("disable_og_pooling", False)
+        self.iters_limit = calculate_sp_interval_iters(self.constants, self.constants.POOL_SUB_SLOT_ITERS)
+        self.pool_minimum_difficulty: uint64 = uint64(1)
+        self.og_pool_state: OgPoolState = OgPoolState(difficulty=self.pool_minimum_difficulty)
+        self.pool_var_diff_target_in_seconds = 5 * 60
+        self.pool_reward_target = self.pool_target
+
         return True
+
+    def is_pooling_enabled(self):
+        return self.pool_url is not None and self.pool_payout_address is not None and not self.is_og_pooling_disabled
 
     async def _start(self) -> None:
         async def start_task() -> None:
@@ -205,12 +239,76 @@ class Farmer:
                 if await self.setup_keys():
                     self.update_pool_state_task = asyncio.create_task(self._periodically_update_pool_state_task())
                     self.cache_clear_task = asyncio.create_task(self._periodically_clear_cache_and_refresh_task())
+                    if not self.is_pooling_enabled():
+                        self.log.info(f"Not OG pooling as 'disable_og_pooling' is set to true in your config")
+                        log.debug("start_task: initialized")
+                        self.started = True
+                        return
+                    self.pool_api_client = PoolApiClient(self.pool_url)
+                    await self.initialize_pooling()
+                    self.adjust_pool_difficulty_task = asyncio.create_task(
+                        self._periodically_adjust_pool_difficulty_task()
+                    )
+                    self.check_pool_reward_target_task = asyncio.create_task(
+                        self._periodically_check_pool_reward_target_task()
+                    )
+                    self.update_og_pool_info_task = asyncio.create_task(
+                        self._periodically_update_og_pool_info_task()
+                    )
                     log.debug("start_task: initialized")
                     self.started = True
                     return
                 await asyncio.sleep(1)
 
         asyncio.create_task(start_task())
+
+    async def initialize_pooling(self):
+        self.log.debug(f"Connecting to OG pool {self.pool_url} ..")
+        is_connected_to_og_pool = False
+        while not is_connected_to_og_pool:
+            try:
+                pool_info = await self.pool_api_client.get_pool_info()
+                self._update_local_pool_info(pool_info)
+                pool_name = pool_info["name"]
+                self.log.info(f"Connected to OG pool {pool_name} ({self.pool_url}) using payout address {self.pool_payout_address}")
+                is_connected_to_og_pool = True
+            except asyncio.TimeoutError:
+                self.log.error(f"Timed out while retrieving OG pool info")
+                await sleep(5)
+            except Exception as e:
+                tb = traceback.format_exc()
+                self.log.error(f"Error connecting to the OG pool: {e} {tb}")
+                await sleep(5)
+
+        self.og_pool_state.difficulty = self.pool_minimum_difficulty
+
+    async def _update_og_pool_info(self):
+        pool_info: Dict
+        try:
+            pool_info = await self.pool_api_client.get_pool_info()
+        except asyncio.TimeoutError:
+            self.log.error(f"Timed out while retrieving OG pool info")
+            return
+        except Exception as e:
+            self.log.error(f"Error retrieving OG pool info: {e}")
+            return
+
+        self._update_local_pool_info(pool_info)
+        self.log.info(f"Updated the OG pool_info successfully")
+
+    def _update_local_pool_info(self, pool_info: Dict):
+        assert pool_info.get("var_diff_target_in_seconds") is not None
+        self.pool_var_diff_target_in_seconds = pool_info["var_diff_target_in_seconds"]
+        assert pool_info.get("minimum_difficulty") is not None
+        self.pool_minimum_difficulty = uint64(pool_info["minimum_difficulty"])
+        assert pool_info.get("target_puzzle_hash") is not None
+        pool_target = bytes32.fromhex(pool_info["target_puzzle_hash"][2:])
+        assert len(pool_target) == 32
+        self.pool_reward_target = pool_target
+        address_prefix = self.config["network_overrides"]["config"][self.config["selected_network"]]["address_prefix"]
+        pool_target_encoded = encode_puzzle_hash(pool_target, address_prefix)
+        if self.pool_target != pool_target or self.pool_target_encoded != pool_target_encoded:
+            self.set_reward_targets(farmer_target_encoded=None, pool_target_encoded=pool_target_encoded)
 
     def _close(self) -> None:
         self._shut_down = True
@@ -220,6 +318,12 @@ class Farmer:
             await self.cache_clear_task
         if self.update_pool_state_task is not None:
             await self.update_pool_state_task
+        if self.adjust_pool_difficulty_task is not None:
+            await self.adjust_pool_difficulty_task
+        if self.check_pool_reward_target_task is not None:
+            await self.check_pool_reward_target_task
+        if self.update_og_pool_info_task is not None:
+            await self.update_og_pool_info_task
         if shutting_down and self.keychain_proxy is not None:
             proxy = self.keychain_proxy
             self.keychain_proxy = None
@@ -629,6 +733,7 @@ class Farmer:
                 self.farmer_target_encoded = farmer_target_encoded
                 self.farmer_target = decode_puzzle_hash(farmer_target_encoded)
                 config["farmer"]["xch_target_address"] = farmer_target_encoded
+                self.pool_payout_address = self.config.get("pool_payout_address", self.farmer_target_encoded)
             if pool_target_encoded is not None:
                 self.pool_target_encoded = pool_target_encoded
                 self.pool_target = decode_puzzle_hash(pool_target_encoded)
@@ -813,3 +918,61 @@ class Farmer:
                 log.error(f"_periodically_clear_cache_and_refresh_task failed: {traceback.format_exc()}")
 
             await asyncio.sleep(1)
+
+    async def _periodically_adjust_pool_difficulty_task(self):
+        time_slept = 0
+        while not self._shut_down:
+            # Sleep in 1 sec intervals to quickly exit outer loop, but effectively sleep 60 sec between actual code runs
+            await sleep(1)
+            time_slept += 1
+            if time_slept < 60:
+                continue
+            time_slept = 0
+            if (time.time() - self.og_pool_state.last_partial_submit_timestamp) < self.pool_var_diff_target_in_seconds:
+                continue
+            diff_since_last_partial_submit_in_seconds = time.time() - self.og_pool_state.last_partial_submit_timestamp
+            missing_partial_submits = int(
+                diff_since_last_partial_submit_in_seconds // self.pool_var_diff_target_in_seconds)
+            new_difficulty = uint64(max(
+                (self.og_pool_state.difficulty - (missing_partial_submits * 2)),
+                self.pool_minimum_difficulty
+            ))
+            if new_difficulty == self.og_pool_state.difficulty:
+                continue
+            old_difficulty = self.og_pool_state.difficulty
+            self.og_pool_state.difficulty = new_difficulty
+            log.info(
+                f"Lowered the OG pool difficulty from {old_difficulty} to "
+                f"{new_difficulty} due to no partial submits within the last "
+                f"{int(round(diff_since_last_partial_submit_in_seconds))} seconds"
+            )
+
+    async def _periodically_check_pool_reward_target_task(self):
+        time_slept = 0
+        while not self._shut_down:
+            # Sleep in 1 sec intervals to quickly exit outer loop, but effectively sleep 5 min between actual code runs
+            await sleep(1)
+            time_slept += 1
+            if time_slept < 5 * 60:
+                continue
+            time_slept = 0
+            if self.pool_target == self.pool_reward_target:
+                continue
+            address_prefix = self.config["network_overrides"]["config"][self.config["selected_network"]]["address_prefix"]
+            pool_target_encoded = encode_puzzle_hash(self.pool_reward_target, address_prefix)
+            self.set_reward_targets(farmer_target_encoded=None, pool_target_encoded=pool_target_encoded)
+
+    async def _periodically_update_og_pool_info_task(self):
+        time_slept = 0
+        while not self._shut_down:
+            # Sleep in 1 sec intervals to quickly exit outer loop, but effectively sleep 1h between actual code runs
+            await sleep(1)
+            time_slept += 1
+            if time_slept < 60 * 60:
+                continue
+            time_slept = 0
+            try:
+                await self._update_og_pool_info()
+            except Exception as e:
+                tb = traceback.format_exc()
+                self.log.error(f"Exception in update_og_pool_info, {e} {tb}")
