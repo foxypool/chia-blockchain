@@ -1100,7 +1100,13 @@ async def test_bad_json(daemon_connection_and_temp_keychain: Tuple[aiohttp.Clien
         response={
             "success": True,
             "plotters": {
-                "chiapos": {"display_name": "Chia Proof of Space", "installed": True, "version": "1.0.11"},
+                "bladebit": {
+                    "can_install": True,
+                    "cuda_support": False,
+                    "display_name": "BladeBit Plotter",
+                    "installed": False,
+                },
+                "chiapos": {"display_name": "Chia Proof of Space", "installed": True, "version": "2.0.0b3"},
                 "madmax": {"can_install": True, "display_name": "madMAx Plotter", "installed": False},
             },
         },

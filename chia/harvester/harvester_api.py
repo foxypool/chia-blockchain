@@ -137,6 +137,22 @@ class HarvesterAPI:
                                 proof_xs = plot_info.prover.get_full_proof(
                                     sp_challenge_hash, index, self.harvester.parallel_read
                                 )
+                            except RuntimeError as e:
+                                if str(e) == "GRResult_NoProof received":
+                                    self.harvester.log.info(
+                                        f"Proof dropped due to line point compression for {filename}"
+                                    )
+                                    self.harvester.log.info(
+                                        f"File: {filename} Plot ID: {plot_id.hex()}, challenge: {sp_challenge_hash}, "
+                                        f"plot_info: {plot_info}"
+                                    )
+                                else:
+                                    self.harvester.log.error(f"Exception fetching full proof for {filename}. {e}")
+                                    self.harvester.log.error(
+                                        f"File: {filename} Plot ID: {plot_id.hex()}, challenge: {sp_challenge_hash}, "
+                                        f"plot_info: {plot_info}"
+                                    )
+                                continue
                             except Exception as e:
                                 self.harvester.log.error(f"Exception fetching full proof for {filename}. {e}")
                                 self.harvester.log.error(
@@ -204,6 +220,7 @@ class HarvesterAPI:
                     awaitables.append(lookup_challenge(try_plot_filename, try_plot_info))
             self.harvester.log.debug(f"new_signage_point_harvester {passed} plots passed the plot filter")
 
+        time_taken = time.time() - start
         # Concurrently executes all lookups on disk, to take advantage of multiple disk parallelism
         total_proofs_found = 0
         for filename_sublist_awaitable in asyncio.as_completed(awaitables):
@@ -223,6 +240,7 @@ class HarvesterAPI:
                 await peer.send_message(msg)
 
         now = uint64(int(time.time()))
+
         farming_info = FarmingInfo(
             new_challenge.challenge_hash,
             new_challenge.sp_hash,
@@ -230,13 +248,14 @@ class HarvesterAPI:
             uint32(passed),
             uint32(total_proofs_found),
             uint32(total),
+            uint64(time_taken * 1_000_000),  # nano seconds,
         )
         pass_msg = make_msg(ProtocolMessageTypes.farming_info, farming_info)
         await peer.send_message(pass_msg)
-        found_time = time.time() - start
+
         self.harvester.log.info(
             f"{len(awaitables)} plots were eligible for farming {new_challenge.challenge_hash.hex()[:10]}..."
-            f" Found {total_proofs_found} proofs. Time: {found_time:.5f} s. "
+            f" Found {total_proofs_found} proofs. Time: {time_taken:.5f} s. "
             f"Total {self.harvester.plot_manager.plot_count()} plots"
         )
         self.harvester.state_changed(
@@ -246,7 +265,7 @@ class HarvesterAPI:
                 "total_plots": self.harvester.plot_manager.plot_count(),
                 "found_proofs": total_proofs_found,
                 "eligible_plots": len(awaitables),
-                "time": found_time,
+                "time": time_taken,
             },
         )
 
@@ -303,6 +322,7 @@ class HarvesterAPI:
     async def request_plots(self, _: harvester_protocol.RequestPlots) -> Message:
         plots_response = []
         plots, failed_to_open_filenames, no_key_filenames = self.harvester.get_plots()
+
         for plot in plots:
             plots_response.append(
                 Plot(
@@ -314,9 +334,9 @@ class HarvesterAPI:
                     plot["plot_public_key"],
                     plot["file_size"],
                     plot["time_modified"],
+                    plot["compression_level"],
                 )
             )
-
         response = harvester_protocol.RespondPlots(plots_response, failed_to_open_filenames, no_key_filenames)
         return make_msg(ProtocolMessageTypes.respond_plots, response)
 
