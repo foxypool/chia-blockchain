@@ -27,24 +27,20 @@ jobs:
     name: MacOS ${{ matrix.os.name }} Installer
     runs-on: ${{ matrix.os.runs-on }}
     timeout-minutes: 90
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
         python-version: [3.9]
         os:
-          - runs-on: macos-10.14
+          - runs-on: macos-11
             name: intel
             file-suffix: ""
             mac-package-name: "Chia-darwin-x64"
             glue-name: "build-macos"
             bladebit-suffix: macos-x86-64.tar.gz
-          - runs-on: [MacOS, ARM64]
-            name: m1
-            file-suffix: "-arm64"
-            mac-package-name: "Chia-darwin-arm64"
-            glue-name: "build-mac-m1"
-            bladebit-suffix: macos-arm64.tar.gz
 
     steps:
       - uses: Chia-Network/actions/clean-workspace@main
@@ -210,11 +206,6 @@ jobs:
           name: chia-installers-macos-dmg-${{ matrix.os.name }}
           path: ${{ github.workspace }}/build_scripts/final_installer/
 
-      - name: Install AWS CLI
-        if: steps.check_secrets.outputs.HAS_AWS_SECRET
-        run: |
-          command -v aws || brew install awscli
-
       - name: Install GH CLI
         run: |
           command -v gh || brew install gh
@@ -223,50 +214,6 @@ jobs:
         run: |
           ls
           shasum -a 256 ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg > ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg.sha256
-
-      - name: Upload to s3
-        if: steps.check_secrets.outputs.HAS_AWS_SECRET
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.INSTALLER_UPLOAD_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.INSTALLER_UPLOAD_SECRET }}
-          AWS_REGION: us-west-2
-          CHIA_INSTALLER_VERSION: ${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}
-        run: |
-          GIT_SHORT_HASH=$(echo "${GITHUB_SHA}" | cut -c1-8)
-          CHIA_DEV_BUILD=${CHIA_INSTALLER_VERSION}-$GIT_SHORT_HASH
-          echo "CHIA_DEV_BUILD=$CHIA_DEV_BUILD" >>$GITHUB_ENV
-          aws s3 cp ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg s3://download.chia.net/dev/Chia-${CHIA_DEV_BUILD}${{ matrix.os.file-suffix }}.dmg
-
-      - name: Create torrent
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        if: env.FULL_RELEASE == 'true'
-        run: |
-          py3createtorrent -f -t udp://tracker.opentrackr.org:1337/announce ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg -o ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg.torrent --webseed https://download.chia.net/install/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg
-          ls ${{ github.workspace }}/build_scripts/final_installer/
-          gh release upload $RELEASE_TAG ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg.torrent
-
-      - name: Upload Dev Installer
-        if: steps.check_secrets.outputs.HAS_AWS_SECRET && github.ref == 'refs/heads/main'
-        env:
-          CHIA_INSTALLER_VERSION: ${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.INSTALLER_UPLOAD_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.INSTALLER_UPLOAD_SECRET }}
-          AWS_REGION: us-west-2
-        run: |
-          aws s3 cp ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg s3://download.chia.net/latest-dev/Chia${{ matrix.os.file-suffix }}_latest_dev.dmg
-          aws s3 cp ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg.sha256 s3://download.chia.net/latest-dev/Chia${{ matrix.os.file-suffix }}_latest_dev.dmg.sha256
-
-      - name: Upload Release Files
-        if: steps.check_secrets.outputs.HAS_AWS_SECRET && env.FULL_RELEASE == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.INSTALLER_UPLOAD_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.INSTALLER_UPLOAD_SECRET }}
-          AWS_REGION: us-west-2
-        run: |
-          aws s3 cp ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg s3://download.chia.net/install/
-          aws s3 cp ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg.sha256 s3://download.chia.net/install/
-          aws s3 cp ${{ github.workspace }}/build_scripts/final_installer/Chia-${{ steps.version_number.outputs.CHIA_INSTALLER_VERSION }}${{ matrix.os.file-suffix }}.dmg.torrent s3://download.chia.net/torrents/
 
       - name: Get tag name
         if: startsWith(github.ref, 'refs/tags/')
@@ -284,11 +231,6 @@ jobs:
           gh release upload \
             $RELEASE_TAG \
             build_scripts/final_installer/*.dmg
-
-      - name: Mark installer complete
-        if: steps.check_secrets.outputs.HAS_GLUE_SECRET && env.FULL_RELEASE == 'true'
-        run: |
-          curl -s -XPOST -H "Authorization: Bearer ${{ secrets.GLUE_ACCESS_TOKEN }}" --data '{"chia_ref": "${{ steps.tag-name.outputs.TAG_NAME }}"}' ${{ secrets.GLUE_API_URL }}/api/v1/${{ steps.tag-name.outputs.REPO_NAME }}/${{ steps.tag-name.outputs.TAG_NAME }}/success/${{ matrix.os.glue-name }}
 
       # We want to delete this no matter what happened in the previous steps (failures, success, etc)
       - name: Delete signing keychain
