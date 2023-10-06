@@ -86,7 +86,6 @@ size_hints = {
     "PrivateKey": PrivateKey.PRIVATE_KEY_SIZE,
     "G1Element": G1Element.SIZE,
     "G2Element": G2Element.SIZE,
-    "ConditionOpcode": 1,
 }
 unhashable_types = [
     "PrivateKey",
@@ -252,14 +251,14 @@ def function_to_convert_one_item(f_type: Type[Any]) -> ConvertFunctionType:
         convert_inner_func = function_to_convert_one_item(inner_type)
         # Ignoring for now as the proper solution isn't obvious
         return lambda items: convert_list(convert_inner_func, items)  # type: ignore[arg-type]
+    elif f_type.__name__ in unhashable_types:
+        # Type is unhashable (bls type), so cast from hex string
+        return lambda item: convert_unhashable_type(f_type, item)
     elif hasattr(f_type, "from_json_dict"):
         return lambda item: f_type.from_json_dict(item)
     elif issubclass(f_type, bytes):
         # Type is bytes, data is a hex string or bytes
         return lambda item: convert_byte_type(f_type, item)
-    elif f_type.__name__ in unhashable_types:
-        # Type is unhashable (bls type), so cast from hex string
-        return lambda item: convert_unhashable_type(f_type, item)
     else:
         # Type is a primitive, cast with correct class
         return lambda item: convert_primitive(f_type, item)
@@ -578,7 +577,6 @@ class Streamable:
     * BLS signatures serialized in bls format (96 bytes)
     * bool serialized into 1 byte (0x01 or 0x00)
     * bytes serialized as a 4 byte size prefix and then the bytes.
-    * ConditionOpcode is serialized as a 1 byte value.
     * str serialized as a 4 byte size prefix and then the utf-8 representation in bytes.
 
     An item is one of:

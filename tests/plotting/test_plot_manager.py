@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from os import unlink
 from pathlib import Path
 from shutil import copy, move
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, cast
 
 import pytest
 from blspy import G1Element
@@ -169,6 +169,7 @@ def trigger_remove_plot(_: Path, plot_path: str):
     remove_plot(Path(plot_path))
 
 
+@pytest.mark.limit_consensus_modes(reason="not dependent on consensus, does not support parallel execution")
 @pytest.mark.asyncio
 async def test_plot_refreshing(environment):
     env: Environment = environment
@@ -186,7 +187,7 @@ async def test_plot_refreshing(environment):
         expected_directories: int,
         expect_total_plots: int,
     ):
-        expected_result.loaded = expect_loaded
+        expected_result.loaded = cast(List[PlotInfo], expect_loaded)
         expected_result.removed = expect_removed
         expected_result.processed = expect_processed
         trigger(env.root_path, str(test_path))

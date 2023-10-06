@@ -14,12 +14,14 @@ from chia.full_node.full_node import FullNode
 from chia.full_node.mempool_check_conditions import get_puzzle_and_solution_for_coin, get_spends_for_block
 from chia.rpc.rpc_server import Endpoint, EndpointResult
 from chia.server.outbound_message import NodeType
+from chia.types.blockchain_format.proof_of_space import calculate_prefix_bits
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.coin_record import CoinRecord
 from chia.types.coin_spend import CoinSpend
 from chia.types.full_block import FullBlock
 from chia.types.generator_types import BlockGenerator
 from chia.types.mempool_inclusion_status import MempoolInclusionStatus
+from chia.types.mempool_item import MempoolItem
 from chia.types.spend_bundle import SpendBundle
 from chia.types.unfinished_header_block import UnfinishedHeaderBlock
 from chia.util.byte_types import hexstr_to_bytes
@@ -112,6 +114,7 @@ class FullNodeRpcApi:
             "/get_all_mempool_tx_ids": self.get_all_mempool_tx_ids,
             "/get_all_mempool_items": self.get_all_mempool_items,
             "/get_mempool_item_by_tx_id": self.get_mempool_item_by_tx_id,
+            "/get_mempool_items_by_coin_name": self.get_mempool_items_by_coin_name,
             # Fee estimation
             "/get_fee_estimate": self.get_fee_estimate,
         }
@@ -560,10 +563,11 @@ class FullNodeRpcApi:
             raise ValueError(f"Older block {older_block_hex} not found")
         delta_weight = newer_block.weight - older_block.weight
 
+        plot_filter_size = calculate_prefix_bits(self.service.constants, newer_block.height)
         delta_iters = newer_block.total_iters - older_block.total_iters
         weight_div_iters = delta_weight / delta_iters
         additional_difficulty_constant = self.service.constants.DIFFICULTY_CONSTANT_FACTOR
-        eligible_plots_filter_multiplier = 2**self.service.constants.NUMBER_ZERO_BITS_PLOT_FILTER
+        eligible_plots_filter_multiplier = 2**plot_filter_size
         network_space_bytes_estimate = (
             UI_ACTUAL_SPACE_CONSTANT_FACTOR
             * weight_div_iters
@@ -789,6 +793,15 @@ class FullNodeRpcApi:
             raise ValueError(f"Tx id 0x{tx_id.hex()} not in the mempool")
 
         return {"mempool_item": item.to_json_dict()}
+
+    async def get_mempool_items_by_coin_name(self, request: Dict[str, Any]) -> EndpointResult:
+        if "coin_name" not in request:
+            raise ValueError("No coin_name in request")
+
+        coin_name: bytes32 = bytes32.from_hexstr(request["coin_name"])
+        items: List[MempoolItem] = self.service.mempool_manager.mempool.get_items_by_coin_id(coin_name)
+
+        return {"mempool_items": [item.to_json_dict() for item in items]}
 
     def _get_spendbundle_type_cost(self, name: str) -> uint64:
         """
