@@ -6,7 +6,7 @@ import logging
 import time
 import traceback
 from math import floor
-from asyncio import sleep
+from asyncio import sleep, gather
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -308,6 +308,30 @@ class Farmer:
                 await sleep(5)
 
         self.og_pool_state.difficulty = self.pool_minimum_difficulty
+        await self._update_pool_difficulty()
+
+    async def _update_pool_difficulty(self):
+        difficulties_with_none = await gather(*[self._get_og_farmer_difficulty(pool_public_key) for pool_public_key in self.pool_public_keys])
+        difficulties = list(filter(lambda difficulty: difficulty is not None, difficulties_with_none))
+        if len(difficulties) == 0:
+            return
+        difficulty_to_use = max(difficulties)
+        if self.og_pool_state.difficulty != difficulty_to_use:
+            self.log.info(f"Updating OG pool difficulty from {self.og_pool_state.difficulty} to {difficulty_to_use}")
+            self.og_pool_state.difficulty = difficulty_to_use
+
+    async def _get_og_farmer_difficulty(self, pool_public_key: G1Element) -> Optional[uint64]:
+        self.log.debug(f"Trying to obtain difficulty for pool public key {pool_public_key}")
+        try:
+            result: Dict = await self.pool_api_client.get_farmer(f"{pool_public_key}")
+            if "current_difficulty" not in result:
+                return
+            difficulty = uint64(result["current_difficulty"])
+            self.log.debug(f"Obtained difficulty {difficulty} for pool public key {pool_public_key}")
+
+            return difficulty
+        except Exception:
+            pass
 
     async def _update_og_pool_info(self):
         pool_info: Dict
@@ -938,27 +962,12 @@ class Farmer:
             # Sleep in 1 sec intervals to quickly exit outer loop, but effectively sleep 60 sec between actual code runs
             await sleep(1)
             time_slept += 1
-            if time_slept < 60:
+            if time_slept < 5 * 60:
                 continue
             time_slept = 0
             if (time.time() - self.og_pool_state.last_partial_submit_timestamp) < self.pool_var_diff_target_in_seconds:
                 continue
-            diff_since_last_partial_submit_in_seconds = time.time() - self.og_pool_state.last_partial_submit_timestamp
-            missing_partial_submits = int(
-                diff_since_last_partial_submit_in_seconds // self.pool_var_diff_target_in_seconds)
-            new_difficulty = uint64(max(
-                (self.og_pool_state.difficulty - (missing_partial_submits * 2)),
-                self.pool_minimum_difficulty
-            ))
-            if new_difficulty == self.og_pool_state.difficulty:
-                continue
-            old_difficulty = self.og_pool_state.difficulty
-            self.og_pool_state.difficulty = new_difficulty
-            log.info(
-                f"Lowered the OG pool difficulty from {old_difficulty} to "
-                f"{new_difficulty} due to no partial submits within the last "
-                f"{int(round(diff_since_last_partial_submit_in_seconds))} seconds"
-            )
+            await self._update_pool_difficulty()
 
     async def _periodically_check_pool_reward_target_task(self):
         time_slept = 0
