@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from secrets import token_bytes
+import random
 from typing import Tuple
-
-from clvm.casts import int_from_bytes
 
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
@@ -40,7 +38,7 @@ NFT_METADATA_UPDATER_DEFAULT = load_clvm(
 )
 
 
-def test_nft_transfer_puzzle_hashes():
+def test_nft_transfer_puzzle_hashes(seeded_random: random.Random):
     maker_pk = int_to_public_key(111)
     maker_p2_puz = puzzle_for_pk(maker_pk)
     maker_p2_ph = maker_p2_puz.get_tree_hash()
@@ -73,7 +71,11 @@ def test_nft_transfer_puzzle_hashes():
     nft_puz = SINGLETON_MOD.curry(SINGLETON_STRUCT, metadata_puz)
 
     nft_info = match_puzzle(uncurry_puzzle(nft_puz))
-    assert nft_info.also().also() is not None
+    assert nft_info is not None
+    also = nft_info.also()
+    assert also is not None
+    also_also = also.also()
+    assert also_also is not None
 
     unft = uncurry_nft.UncurriedNFT.uncurry(*nft_puz.uncurry())
     assert unft is not None
@@ -85,7 +87,7 @@ def test_nft_transfer_puzzle_hashes():
     taker_p2_ph = taker_p2_puz.get_tree_hash()
 
     # make nft solution
-    fake_lineage_proof = Program.to([token_bytes(32), maker_p2_ph, 1])
+    fake_lineage_proof = Program.to([bytes32.random(seeded_random), maker_p2_ph, 1])
     transfer_conditions = Program.to([[51, taker_p2_ph, 1, [taker_p2_ph]], [-10, [], [], []]])
 
     ownership_sol = Program.to([solution_for_conditions(transfer_conditions)])
@@ -98,7 +100,7 @@ def test_nft_transfer_puzzle_hashes():
     # get the new NFT puzhash
     for cond in conds.as_iter():
         if cond.first().as_int() == 51:
-            expected_ph = bytes32(cond.at("rf").atom)
+            expected_ph = bytes32(cond.at("rf").as_atom())
 
     # recreate the puzzle for new_puzhash
     new_ownership_puz = NFT_OWNERSHIP_LAYER.curry(NFT_OWNERSHIP_LAYER.get_tree_hash(), None, transfer_puz, taker_p2_puz)
@@ -166,11 +168,11 @@ def make_a_new_nft_puzzle(curried_ownership_layer: Program, metadata: Program) -
 def get_updated_nft_puzzle(puzzle: Program, solution: Program) -> bytes32:
     result = puzzle.run(solution)
     for condition in result.as_iter():
-        code = int_from_bytes(condition.first().atom)
+        code = condition.first().as_int()
         if code == 51:
-            if int_from_bytes(condition.rest().rest().first().atom) == 1:
+            if condition.at("rrf").as_int() == 1:
                 # this is our new puzzle hash
-                return bytes32(condition.rest().first().atom)
+                return bytes32(condition.at("rf").as_atom())
     raise ValueError("No create coin condition found")
 
 

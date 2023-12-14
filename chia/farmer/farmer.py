@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -8,10 +9,10 @@ import traceback
 from math import floor
 from asyncio import sleep, gather
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, AsyncIterator, ClassVar, Dict, List, Optional, Set, Tuple, Union, cast
 
 import aiohttp
-from blspy import AugSchemeMPL, G1Element, G2Element, PrivateKey
+from chia_rs import AugSchemeMPL, G1Element, G2Element, PrivateKey
 
 from chia.consensus.constants import ConsensusConstants
 from chia.consensus.pot_iterations import calculate_sp_interval_iters
@@ -112,6 +113,11 @@ HARVESTER PROTOCOL (FARMER <-> HARVESTER)
 
 
 class Farmer:
+    if TYPE_CHECKING:
+        from chia.rpc.rpc_server import RpcServiceProtocol
+
+        _protocol_check: ClassVar[RpcServiceProtocol] = cast("Farmer", None)
+
     def __init__(
         self,
         root_path: Path,
@@ -184,6 +190,59 @@ class Farmer:
         self.check_pool_reward_target_task: Optional[asyncio.Task] = None
         self.update_og_pool_info_task: Optional[asyncio.Task] = None
         self.pool_api_client = None
+
+    @contextlib.asynccontextmanager
+    async def manage(self) -> AsyncIterator[None]:
+        async def start_task() -> None:
+            # `Farmer.setup_keys` returns `False` if there are no keys setup yet. In this case we just try until it
+            # succeeds or until we need to shut down.
+            while not self._shut_down:
+                if await self.setup_keys():
+                    self.update_pool_state_task = asyncio.create_task(self._periodically_update_pool_state_task())
+                    self.cache_clear_task = asyncio.create_task(self._periodically_clear_cache_and_refresh_task())
+                    if not self.is_pooling_enabled():
+                        self.log.info(f"Not OG pooling as 'disable_og_pooling' is set to true in your config")
+                        log.debug("start_task: initialized")
+                        self.started = True
+                        return
+                    self.pool_api_client = PoolApiClient(self.pool_url)
+                    await self.initialize_pooling()
+                    self.adjust_pool_difficulty_task = asyncio.create_task(
+                        self._periodically_adjust_pool_difficulty_task()
+                    )
+                    self.check_pool_reward_target_task = asyncio.create_task(
+                        self._periodically_check_pool_reward_target_task()
+                    )
+                    self.update_og_pool_info_task = asyncio.create_task(
+                        self._periodically_update_og_pool_info_task()
+                    )
+                    log.debug("start_task: initialized")
+                    self.started = True
+                    return
+                await asyncio.sleep(1)
+
+        asyncio.create_task(start_task())
+        try:
+            yield
+        finally:
+            self._shut_down = True
+
+            if self.cache_clear_task is not None:
+                await self.cache_clear_task
+            if self.update_pool_state_task is not None:
+                await self.update_pool_state_task
+            if self.adjust_pool_difficulty_task is not None:
+                await self.adjust_pool_difficulty_task
+            if self.check_pool_reward_target_task is not None:
+                await self.check_pool_reward_target_task
+            if self.update_og_pool_info_task is not None:
+                await self.update_og_pool_info_task
+            if self.keychain_proxy is not None:
+                proxy = self.keychain_proxy
+                self.keychain_proxy = None
+                await proxy.close()
+                await asyncio.sleep(0.5)  # https://docs.aiohttp.org/en/stable/client_advanced.html#graceful-shutdown
+            self.started = False
 
     def get_connections(self, request_node_type: Optional[NodeType]) -> List[Dict[str, Any]]:
         return default_get_connections(server=self.server, request_node_type=request_node_type)
@@ -258,37 +317,6 @@ class Farmer:
     def is_pooling_enabled(self):
         return self.pool_url is not None and self.pool_payout_address is not None and not self.is_og_pooling_disabled
 
-    async def _start(self) -> None:
-        async def start_task() -> None:
-            # `Farmer.setup_keys` returns `False` if there are no keys setup yet. In this case we just try until it
-            # succeeds or until we need to shut down.
-            while not self._shut_down:
-                if await self.setup_keys():
-                    self.update_pool_state_task = asyncio.create_task(self._periodically_update_pool_state_task())
-                    self.cache_clear_task = asyncio.create_task(self._periodically_clear_cache_and_refresh_task())
-                    if not self.is_pooling_enabled():
-                        self.log.info(f"Not OG pooling as 'disable_og_pooling' is set to true in your config")
-                        log.debug("start_task: initialized")
-                        self.started = True
-                        return
-                    self.pool_api_client = PoolApiClient(self.pool_url)
-                    await self.initialize_pooling()
-                    self.adjust_pool_difficulty_task = asyncio.create_task(
-                        self._periodically_adjust_pool_difficulty_task()
-                    )
-                    self.check_pool_reward_target_task = asyncio.create_task(
-                        self._periodically_check_pool_reward_target_task()
-                    )
-                    self.update_og_pool_info_task = asyncio.create_task(
-                        self._periodically_update_og_pool_info_task()
-                    )
-                    log.debug("start_task: initialized")
-                    self.started = True
-                    return
-                await asyncio.sleep(1)
-
-        asyncio.create_task(start_task())
-
     async def initialize_pooling(self):
         self.log.debug(f"Connecting to OG pool {self.pool_url} ..")
         is_connected_to_og_pool = False
@@ -361,27 +389,6 @@ class Farmer:
         if self.pool_target != pool_target or self.pool_target_encoded != pool_target_encoded:
             self.set_reward_targets(farmer_target_encoded=None, pool_target_encoded=pool_target_encoded)
 
-    def _close(self) -> None:
-        self._shut_down = True
-
-    async def _await_closed(self, shutting_down: bool = True) -> None:
-        if self.cache_clear_task is not None:
-            await self.cache_clear_task
-        if self.update_pool_state_task is not None:
-            await self.update_pool_state_task
-        if self.adjust_pool_difficulty_task is not None:
-            await self.adjust_pool_difficulty_task
-        if self.check_pool_reward_target_task is not None:
-            await self.check_pool_reward_target_task
-        if self.update_og_pool_info_task is not None:
-            await self.update_og_pool_info_task
-        if shutting_down and self.keychain_proxy is not None:
-            proxy = self.keychain_proxy
-            self.keychain_proxy = None
-            await proxy.close()
-            await asyncio.sleep(0.5)  # https://docs.aiohttp.org/en/stable/client_advanced.html#graceful-shutdown
-        self.started = False
-
     def _set_state_changed_callback(self, callback: StateChangedProtocol) -> None:
         self.state_changed_callback = callback
 
@@ -434,7 +441,7 @@ class Farmer:
             value=ErrorResponse(uint16(PoolErrorCode.REQUEST_FAILED.value), error_message).to_json_dict(),
         )
 
-    def on_disconnect(self, connection: WSChiaConnection) -> None:
+    async def on_disconnect(self, connection: WSChiaConnection) -> None:
         self.log.info(f"peer disconnected {connection.get_peer_logging()}")
         self.state_changed("close_connection", {})
         if connection.connection_type is NodeType.HARVESTER:
@@ -652,6 +659,8 @@ class Farmer:
                         "valid_partials_24h": [],
                         "invalid_partials_since_start": 0,
                         "invalid_partials_24h": [],
+                        "insufficient_partials_since_start": 0,
+                        "insufficient_partials_24h": [],
                         "stale_partials_since_start": 0,
                         "stale_partials_24h": [],
                         "missing_partials_since_start": 0,

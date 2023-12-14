@@ -7,15 +7,15 @@ import pytest
 
 from chia.protocols.wallet_protocol import CoinState
 from chia.server.outbound_message import NodeType
-from chia.simulator.setup_nodes import SimulatorsAndWallets
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.peer_info import PeerInfo
-from chia.util.ints import uint16, uint32
+from chia.util.ints import uint32
 from chia.wallet.derivation_record import DerivationRecord
 from chia.wallet.derive_keys import master_sk_to_wallet_sk, master_sk_to_wallet_sk_unhardened
 from chia.wallet.util.wallet_types import WalletType
 from chia.wallet.wallet_state_manager import WalletStateManager
+from tests.util.setup_nodes import OldSimulatorsAndWallets
 
 
 @asynccontextmanager
@@ -36,8 +36,8 @@ async def assert_sync_mode(wallet_state_manager: WalletStateManager, target_heig
     assert wallet_state_manager.sync_target is None
 
 
-@pytest.mark.asyncio
-async def test_set_sync_mode(simulator_and_wallet: SimulatorsAndWallets) -> None:
+@pytest.mark.anyio
+async def test_set_sync_mode(simulator_and_wallet: OldSimulatorsAndWallets) -> None:
     _, [(wallet_node, _)], _ = simulator_and_wallet
     async with assert_sync_mode(wallet_node.wallet_state_manager, uint32(1)):
         pass
@@ -47,16 +47,16 @@ async def test_set_sync_mode(simulator_and_wallet: SimulatorsAndWallets) -> None
         pass
 
 
-@pytest.mark.asyncio
-async def test_set_sync_mode_exception(simulator_and_wallet: SimulatorsAndWallets) -> None:
+@pytest.mark.anyio
+async def test_set_sync_mode_exception(simulator_and_wallet: OldSimulatorsAndWallets) -> None:
     _, [(wallet_node, _)], _ = simulator_and_wallet
     async with assert_sync_mode(wallet_node.wallet_state_manager, uint32(1)):
         raise Exception
 
 
 @pytest.mark.parametrize("hardened", [True, False])
-@pytest.mark.asyncio
-async def test_get_private_key(simulator_and_wallet: SimulatorsAndWallets, hardened: bool) -> None:
+@pytest.mark.anyio
+async def test_get_private_key(simulator_and_wallet: OldSimulatorsAndWallets, hardened: bool) -> None:
     _, [(wallet_node, _)], _ = simulator_and_wallet
     wallet_state_manager: WalletStateManager = wallet_node.wallet_state_manager
     derivation_index = uint32(10000)
@@ -74,8 +74,8 @@ async def test_get_private_key(simulator_and_wallet: SimulatorsAndWallets, harde
     assert await wallet_state_manager.get_private_key(record.puzzle_hash) == expected_private_key
 
 
-@pytest.mark.asyncio
-async def test_get_private_key_failure(simulator_and_wallet: SimulatorsAndWallets) -> None:
+@pytest.mark.anyio
+async def test_get_private_key_failure(simulator_and_wallet: OldSimulatorsAndWallets) -> None:
     _, [(wallet_node, _)], _ = simulator_and_wallet
     wallet_state_manager: WalletStateManager = wallet_node.wallet_state_manager
     invalid_puzzle_hash = bytes32(b"1" * 32)
@@ -83,13 +83,13 @@ async def test_get_private_key_failure(simulator_and_wallet: SimulatorsAndWallet
         await wallet_state_manager.get_private_key(bytes32(b"1" * 32))
 
 
-@pytest.mark.asyncio
-async def test_determine_coin_type(simulator_and_wallet: SimulatorsAndWallets, self_hostname: str) -> None:
+@pytest.mark.anyio
+async def test_determine_coin_type(simulator_and_wallet: OldSimulatorsAndWallets, self_hostname: str) -> None:
     full_nodes, wallets, _ = simulator_and_wallet
     full_node_api = full_nodes[0]
     full_node_server = full_node_api.full_node.server
     wallet_node, wallet_server = wallets[0]
-    await wallet_server.start_client(PeerInfo(self_hostname, uint16(full_node_server._port)), None)
+    await wallet_server.start_client(PeerInfo(self_hostname, full_node_server.get_port()), None)
     wallet_state_manager: WalletStateManager = wallet_node.wallet_state_manager
     peer = wallet_node.server.get_connections(NodeType.FULL_NODE)[0]
     assert (None, None) == await wallet_state_manager.determine_coin_type(

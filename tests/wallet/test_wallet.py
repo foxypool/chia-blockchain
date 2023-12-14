@@ -8,20 +8,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pytest
-from blspy import AugSchemeMPL, G1Element, G2Element
+from chia_rs import AugSchemeMPL, G1Element, G2Element
 
 from chia.rpc.wallet_rpc_api import WalletRpcApi
 from chia.server.server import ChiaServer
 from chia.simulator.block_tools import BlockTools
 from chia.simulator.full_node_simulator import FullNodeSimulator, wait_for_coins_in_wallet
 from chia.simulator.simulator_protocol import FarmNewBlockProtocol, ReorgProtocol
-from chia.simulator.time_out_assert import time_out_assert, time_out_assert_not_none
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.coin_spend import compute_additions
 from chia.types.peer_info import PeerInfo
+from chia.types.signing_mode import CHIP_0002_SIGN_MESSAGE_PREFIX
+from chia.types.spend_bundle import estimate_fees
 from chia.util.bech32m import encode_puzzle_hash
-from chia.util.ints import uint16, uint32, uint64
+from chia.util.ints import uint32, uint64
 from chia.wallet.conditions import ConditionValidTimes
 from chia.wallet.derive_keys import master_sk_to_wallet_sk
 from chia.wallet.payment import Payment
@@ -31,10 +32,10 @@ from chia.wallet.util.query_filter import TransactionTypeFilter
 from chia.wallet.util.transaction_type import TransactionType
 from chia.wallet.util.tx_config import DEFAULT_COIN_SELECTION_CONFIG, DEFAULT_TX_CONFIG
 from chia.wallet.util.wallet_types import CoinType
-from chia.wallet.wallet import CHIP_0002_SIGN_MESSAGE_PREFIX
 from chia.wallet.wallet_node import WalletNode, get_wallet_db_path
 from chia.wallet.wallet_state_manager import WalletStateManager
 from tests.conftest import ConsensusMode
+from tests.util.time_out_assert import time_out_assert, time_out_assert_not_none
 
 
 class TestWalletSimulator:
@@ -42,7 +43,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_coinbase(
         self,
         simulator_and_wallet: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -61,7 +62,7 @@ class TestWalletSimulator:
         else:
             wallet_node.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         wsm: WalletStateManager = wallet_node.wallet_state_manager
@@ -87,7 +88,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_make_transaction(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -108,13 +109,13 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
 
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         tx_amount = 10
 
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(tx_amount),
             await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG,
@@ -140,7 +141,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_reuse_address(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -161,12 +162,12 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
 
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
         tx_amount = 10
 
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(tx_amount),
             await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG.override(reuse_puzhash=True),
@@ -193,7 +194,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_clawback_claim_auto(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -216,15 +217,15 @@ class TestWalletSimulator:
             wallet_node_2.config["trusted_peers"] = {}
         wallet_node_2.config["auto_claim"]["tx_fee"] = 100
         wallet_node_2.config["auto_claim"]["batch_size"] = 1
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
         assert await wallet.get_confirmed_balance() == expected_confirmed_balance
         assert await wallet.get_unconfirmed_balance() == expected_confirmed_balance
         await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_1)
         normal_puzhash = await wallet_1.get_new_puzzlehash()
         # Transfer to normal wallet
-        tx1 = await wallet.generate_signed_transaction(
+        [tx1] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -240,7 +241,7 @@ class TestWalletSimulator:
         await time_out_assert(
             20, wallet_node_2.wallet_state_manager.coin_store.count_small_unspent, 1, 1000, CoinType.CLAWBACK
         )
-        tx2 = await wallet.generate_signed_transaction(
+        [tx2] = await wallet.generate_signed_transaction(
             uint64(500),
             await wallet_1.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG,
@@ -256,7 +257,7 @@ class TestWalletSimulator:
         await time_out_assert(
             20, wallet_node_2.wallet_state_manager.coin_store.count_small_unspent, 2, 1000, CoinType.CLAWBACK
         )
-        tx3 = await wallet.generate_signed_transaction(
+        [tx3] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -301,7 +302,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_clawback_clawback(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -325,8 +326,8 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         assert await wallet.get_confirmed_balance() == expected_confirmed_balance
@@ -334,7 +335,7 @@ class TestWalletSimulator:
 
         normal_puzhash = await wallet_1.get_new_puzzlehash()
         # Transfer to normal wallet
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -424,7 +425,7 @@ class TestWalletSimulator:
 
     @pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0], reason="save time")
     @pytest.mark.parametrize("trusted", [True, False])
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_clawback_sent_self(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -448,8 +449,8 @@ class TestWalletSimulator:
             wallet_node_2.config["trusted_peers"] = {}
         wallet_node_2.config["auto_claim"]["enabled"] = False
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         assert await wallet.get_confirmed_balance() == expected_confirmed_balance
@@ -457,7 +458,7 @@ class TestWalletSimulator:
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_1)
         normal_puzhash = await wallet.get_new_puzzlehash()
         # Transfer to normal wallet
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -510,7 +511,7 @@ class TestWalletSimulator:
 
     @pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0], reason="save time")
     @pytest.mark.parametrize("trusted", [True, False])
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_clawback_claim_manual(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -535,8 +536,8 @@ class TestWalletSimulator:
             wallet_node_2.config["trusted_peers"] = {}
         wallet_node_2.config["auto_claim"]["enabled"] = False
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         assert await wallet.get_confirmed_balance() == expected_confirmed_balance
@@ -544,7 +545,7 @@ class TestWalletSimulator:
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_1)
         normal_puzhash = await wallet_1.get_new_puzzlehash()
         # Transfer to normal wallet
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -602,7 +603,7 @@ class TestWalletSimulator:
 
     @pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0], reason="save time")
     @pytest.mark.parametrize("trusted", [True, False])
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_clawback_reorg(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -625,8 +626,8 @@ class TestWalletSimulator:
             wallet_node_2.config["trusted_peers"] = {}
         wallet_node_2.config["auto_claim"]["enabled"] = False
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         assert await wallet.get_confirmed_balance() == expected_confirmed_balance
@@ -634,7 +635,7 @@ class TestWalletSimulator:
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_1)
         normal_puzhash = await wallet_1.get_new_puzzlehash()
         # Transfer to normal wallet
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -700,7 +701,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_get_clawback_coins(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -723,8 +724,8 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         assert await wallet.get_confirmed_balance() == expected_confirmed_balance
@@ -732,7 +733,7 @@ class TestWalletSimulator:
 
         normal_puzhash = await wallet_1.get_new_puzzlehash()
         # Transfer to normal wallet
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(500),
             normal_puzhash,
             DEFAULT_TX_CONFIG,
@@ -760,7 +761,7 @@ class TestWalletSimulator:
 
     @pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0], reason="save time")
     @pytest.mark.parametrize("trusted", [True, False])
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_clawback_resync(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -783,14 +784,14 @@ class TestWalletSimulator:
             wallet_node_1.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await wallet_server_1.start_client(PeerInfo(self_hostname, uint16(full_node_server._port)), None)
-        await wallet_server_2.start_client(PeerInfo(self_hostname, uint16(full_node_server._port)), None)
+        await wallet_server_1.start_client(PeerInfo(self_hostname, full_node_server.get_port()), None)
+        await wallet_server_2.start_client(PeerInfo(self_hostname, full_node_server.get_port()), None)
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_1)
         wallet_1_puzhash = await wallet_1.get_new_puzzlehash()
         wallet_2_puzhash = await wallet_2.get_new_puzzlehash()
 
         # Transfer to normal wallet
-        tx1 = await wallet_1.generate_signed_transaction(
+        [tx1] = await wallet_1.generate_signed_transaction(
             uint64(500),
             wallet_2_puzhash,
             DEFAULT_TX_CONFIG,
@@ -810,7 +811,7 @@ class TestWalletSimulator:
         await time_out_assert(
             20, wallet_node_2.wallet_state_manager.coin_store.count_small_unspent, 1, 1000, CoinType.CLAWBACK
         )
-        tx2 = await wallet_1.generate_signed_transaction(
+        [tx2] = await wallet_1.generate_signed_transaction(
             uint64(700),
             wallet_1_puzhash,
             DEFAULT_TX_CONFIG,
@@ -891,9 +892,9 @@ class TestWalletSimulator:
 
         # use second node to start the same wallet, reusing config and db
         await wallet_node_1._start()
-        await wallet_server_1.start_client(PeerInfo(self_hostname, uint16(full_node_server._port)), None)
+        await wallet_server_1.start_client(PeerInfo(self_hostname, full_node_server.get_port()), None)
         await wallet_node_2._start()
-        await wallet_server_2.start_client(PeerInfo(self_hostname, uint16(full_node_server._port)), None)
+        await wallet_server_2.start_client(PeerInfo(self_hostname, full_node_server.get_port()), None)
         await full_node_api.farm_new_transaction_block(FarmNewBlockProtocol(bytes32(b"\00" * 32)))
         await full_node_api.wait_for_wallet_synced(wallet_node=wallet_node_1, timeout=20)
         await full_node_api.wait_for_wallet_synced(wallet_node=wallet_node_2, timeout=20)
@@ -956,7 +957,7 @@ class TestWalletSimulator:
 
     @pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0], reason="save time")
     @pytest.mark.parametrize("trusted", [True, False])
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_coinbase_reorg(
         self,
         simulator_and_wallet: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -972,7 +973,7 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {fn_server.node_id.hex(): fn_server.node_id.hex()}
         else:
             wallet_node.config["trusted_peers"] = {}
-        await server_2.start_client(PeerInfo(self_hostname, uint16(fn_server._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, fn_server.get_port()), None)
         await asyncio.sleep(5)
 
         permanent_blocks = 3
@@ -995,7 +996,7 @@ class TestWalletSimulator:
 
     @pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0], reason="save time")
     @pytest.mark.parametrize("trusted", [True, False])
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_send_to_three_peers(
         self,
         three_sim_two_wallets: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1030,7 +1031,7 @@ class TestWalletSimulator:
             wallet_0.config["trusted_peers"] = {}
 
         # wallet0 <-> sever0
-        await wallet_server_0.start_client(PeerInfo(self_hostname, uint16(server_0._port)), None)
+        await wallet_server_0.start_client(PeerInfo(self_hostname, server_0.get_port()), None)
 
         await full_node_api_0.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_0.wallet_state_manager.main_wallet)
 
@@ -1040,7 +1041,7 @@ class TestWalletSimulator:
             await full_node_1.add_block(block)
             await full_node_2.add_block(block)
 
-        tx = await wallet_0.wallet_state_manager.main_wallet.generate_signed_transaction(
+        [tx] = await wallet_0.wallet_state_manager.main_wallet.generate_signed_transaction(
             uint64(10),
             bytes32(32 * b"0"),
             DEFAULT_TX_CONFIG,
@@ -1051,18 +1052,18 @@ class TestWalletSimulator:
         await full_node_api_0.wait_transaction_records_entered_mempool(records=[tx])
 
         # wallet0 <-> sever1
-        await wallet_server_0.start_client(PeerInfo(self_hostname, uint16(server_1._port)), wallet_0.on_connect)
+        await wallet_server_0.start_client(PeerInfo(self_hostname, server_1.get_port()), wallet_0.on_connect)
         await full_node_api_1.wait_transaction_records_entered_mempool(records=[tx])
 
         # wallet0 <-> sever2
-        await wallet_server_0.start_client(PeerInfo(self_hostname, uint16(server_2._port)), wallet_0.on_connect)
+        await wallet_server_0.start_client(PeerInfo(self_hostname, server_2.get_port()), wallet_0.on_connect)
         await full_node_api_2.wait_transaction_records_entered_mempool(records=[tx])
 
     @pytest.mark.parametrize(
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_make_transaction_hop(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1087,9 +1088,9 @@ class TestWalletSimulator:
         else:
             wallet_node_0.config["trusted_peers"] = {}
             wallet_node_1.config["trusted_peers"] = {}
-        await wallet_0_server.start_client(PeerInfo(self_hostname, uint16(server_0._port)), None)
+        await wallet_0_server.start_client(PeerInfo(self_hostname, server_0.get_port()), None)
 
-        await wallet_1_server.start_client(PeerInfo(self_hostname, uint16(server_0._port)), None)
+        await wallet_1_server.start_client(PeerInfo(self_hostname, server_0.get_port()), None)
 
         expected_confirmed_balance = await full_node_api_0.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_0)
 
@@ -1097,7 +1098,7 @@ class TestWalletSimulator:
         assert await wallet_0.get_unconfirmed_balance() == expected_confirmed_balance
 
         tx_amount = 10
-        tx = await wallet_0.generate_signed_transaction(
+        [tx] = await wallet_0.generate_signed_transaction(
             uint64(tx_amount),
             await wallet_node_1.wallet_state_manager.main_wallet.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG,
@@ -1119,7 +1120,7 @@ class TestWalletSimulator:
         await time_out_assert(20, wallet_1.get_confirmed_balance, 10)
 
         tx_amount = 5
-        tx = await wallet_1.generate_signed_transaction(
+        [tx] = await wallet_1.generate_signed_transaction(
             uint64(tx_amount), await wallet_0.get_new_puzzlehash(), DEFAULT_TX_CONFIG, uint64(0)
         )
         await wallet_1.push_transaction(tx)
@@ -1140,7 +1141,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_make_transaction_with_fee(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1165,7 +1166,7 @@ class TestWalletSimulator:
         else:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
-        await server_2.start_client(PeerInfo(self_hostname, uint16(full_node_1.full_node.server._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, full_node_1.full_node.server.get_port()), None)
 
         expected_confirmed_balance = await full_node_1.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
@@ -1174,7 +1175,7 @@ class TestWalletSimulator:
 
         tx_amount = 3200000000000
         tx_fee = 10
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(tx_amount),
             await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG,
@@ -1182,7 +1183,7 @@ class TestWalletSimulator:
         )
         assert tx.spend_bundle is not None
 
-        fees = tx.spend_bundle.fees()
+        fees = estimate_fees(tx.spend_bundle)
         assert fees == tx_fee
 
         await wallet.push_transaction(tx)
@@ -1204,7 +1205,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_make_transaction_with_memo(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1232,8 +1233,8 @@ class TestWalletSimulator:
         else:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
-        await server_2.start_client(PeerInfo(self_hostname, uint16(full_node_1.full_node.server._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(full_node_1.full_node.server._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, full_node_1.full_node.server.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, full_node_1.full_node.server.get_port()), None)
 
         expected_confirmed_balance = await full_node_1.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
@@ -1243,13 +1244,13 @@ class TestWalletSimulator:
         tx_amount = 3200000000000
         tx_fee = 10
         ph_2 = await wallet_1.get_new_puzzlehash()
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(tx_amount), ph_2, DEFAULT_TX_CONFIG, uint64(tx_fee), memos=[ph_2]
         )
         tx_id = tx.name.hex()
         assert tx.spend_bundle is not None
 
-        fees = tx.spend_bundle.fees()
+        fees = estimate_fees(tx.spend_bundle)
         assert fees == tx_fee
 
         await wallet.push_transaction(tx)
@@ -1276,7 +1277,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_create_hit_max_send_amount(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1302,14 +1303,14 @@ class TestWalletSimulator:
         else:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
-        await server_2.start_client(PeerInfo(self_hostname, uint16(full_node_1.full_node.server._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, full_node_1.full_node.server.get_port()), None)
 
         expected_confirmed_balance = await full_node_1.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
         await time_out_assert(20, wallet.get_confirmed_balance, expected_confirmed_balance)
 
         primaries = [Payment(ph, uint64(1000000000 + i)) for i in range(60)]
-        tx_split_coins = await wallet.generate_signed_transaction(
+        [tx_split_coins] = await wallet.generate_signed_transaction(
             uint64(1), ph, DEFAULT_TX_CONFIG, uint64(0), primaries=primaries
         )
         assert tx_split_coins.spend_bundle is not None
@@ -1321,7 +1322,7 @@ class TestWalletSimulator:
         max_sent_amount = await wallet.get_max_send_amount()
 
         # 1) Generate transaction that is under the limit
-        transaction_record = await wallet.generate_signed_transaction(
+        [transaction_record] = await wallet.generate_signed_transaction(
             uint64(max_sent_amount - 1),
             ph,
             DEFAULT_TX_CONFIG,
@@ -1331,7 +1332,7 @@ class TestWalletSimulator:
         assert transaction_record.amount == uint64(max_sent_amount - 1)
 
         # 2) Generate transaction that is equal to limit
-        transaction_record = await wallet.generate_signed_transaction(
+        [transaction_record] = await wallet.generate_signed_transaction(
             uint64(max_sent_amount),
             ph,
             DEFAULT_TX_CONFIG,
@@ -1353,7 +1354,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_prevent_fee_theft(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1378,7 +1379,7 @@ class TestWalletSimulator:
         else:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
-        await server_2.start_client(PeerInfo(self_hostname, uint16(full_node_1.full_node.server._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, full_node_1.full_node.server.get_port()), None)
 
         expected_confirmed_balance = await full_node_1.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
@@ -1389,7 +1390,7 @@ class TestWalletSimulator:
         assert await wallet.get_unconfirmed_balance() == expected_confirmed_balance
         tx_amount = 3200000000000
         tx_fee = 300000000000
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(tx_amount),
             await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG,
@@ -1440,7 +1441,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_tx_reorg(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1467,8 +1468,8 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(fn_server._port)), None)
-        await server_3.start_client(PeerInfo(self_hostname, uint16(fn_server._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, fn_server.get_port()), None)
+        await server_3.start_client(PeerInfo(self_hostname, fn_server.get_port()), None)
         permanent_funds = await full_node_api.farm_blocks_to_wallet(count=permanent_block_count, wallet=wallet)
 
         await full_node_api.wait_for_wallet_synced(wallet_node=wallet_node, timeout=5)
@@ -1484,7 +1485,7 @@ class TestWalletSimulator:
         assert reorg_height is not None
         reorg_funds = await full_node_api.farm_blocks_to_wallet(count=reorg_block_count, wallet=wallet)
 
-        tx = await wallet.generate_signed_transaction(uint64(tx_amount), ph2, DEFAULT_TX_CONFIG, coins={coin})
+        [tx] = await wallet.generate_signed_transaction(uint64(tx_amount), ph2, DEFAULT_TX_CONFIG, coins={coin})
         assert tx.spend_bundle is not None
         await wallet.push_transaction(tx)
         await full_node_api.process_transaction_records(records=[tx])
@@ -1546,7 +1547,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_address_sliding_window(
         self,
         wallet_node_100_pk: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1563,7 +1564,7 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
         wallet = wallet_node.wallet_state_manager.main_wallet
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
 
         puzzle_hashes = []
         for i in range(211):
@@ -1609,7 +1610,7 @@ class TestWalletSimulator:
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sign_message(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1632,7 +1633,7 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
         # Test general string
         message = "Hello World"
         response = await api_0.sign_message_by_address({"address": encode_puzzle_hash(ph, "xch"), "message": message})
@@ -1658,7 +1659,7 @@ class TestWalletSimulator:
         # Test informal input
         message = "0123456789ABCDEF"
         response = await api_0.sign_message_by_address(
-            {"address": encode_puzzle_hash(ph, "xch"), "message": message, "is_hex": "true"}
+            {"address": encode_puzzle_hash(ph, "xch"), "message": message, "is_hex": "true", "safe_mode": "true"}
         )
         puzzle = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, bytes.fromhex(message)))
 
@@ -1667,12 +1668,34 @@ class TestWalletSimulator:
             puzzle.get_tree_hash(),
             G2Element.from_bytes(bytes.fromhex(response["signature"])),
         )
+        # Test BLS sign string
+        message = "Hello World"
+        response = await api_0.sign_message_by_address(
+            {"address": encode_puzzle_hash(ph, "xch"), "message": message, "is_hex": False, "safe_mode": False}
+        )
+
+        assert AugSchemeMPL.verify(
+            G1Element.from_bytes(bytes.fromhex(response["pubkey"])),
+            bytes(message, "utf-8"),
+            G2Element.from_bytes(bytes.fromhex(response["signature"])),
+        )
+        # Test BLS sign hex
+        message = "0123456789ABCDEF"
+        response = await api_0.sign_message_by_address(
+            {"address": encode_puzzle_hash(ph, "xch"), "message": message, "is_hex": True, "safe_mode": False}
+        )
+
+        assert AugSchemeMPL.verify(
+            G1Element.from_bytes(bytes.fromhex(response["pubkey"])),
+            bytes.fromhex(message),
+            G2Element.from_bytes(bytes.fromhex(response["signature"])),
+        )
 
     @pytest.mark.parametrize(
         "trusted",
         [True, False],
     )
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_wallet_transaction_options(
         self,
         two_wallet_nodes: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
@@ -1695,7 +1718,7 @@ class TestWalletSimulator:
             wallet_node.config["trusted_peers"] = {}
             wallet_node_2.config["trusted_peers"] = {}
 
-        await server_2.start_client(PeerInfo(self_hostname, uint16(server_1._port)), None)
+        await server_2.start_client(PeerInfo(self_hostname, server_1.get_port()), None)
 
         expected_confirmed_balance = await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet)
 
@@ -1706,7 +1729,7 @@ class TestWalletSimulator:
         coins = await wallet.select_coins(uint64(AMOUNT_TO_SEND), DEFAULT_TX_CONFIG.coin_selection_config)
         coin_list = list(coins)
 
-        tx = await wallet.generate_signed_transaction(
+        [tx] = await wallet.generate_signed_transaction(
             uint64(AMOUNT_TO_SEND),
             await wallet_node_2.wallet_state_manager.main_wallet.get_new_puzzlehash(),
             DEFAULT_TX_CONFIG,
@@ -1776,3 +1799,13 @@ def test_get_wallet_db_path_testnet() -> None:
     wallet_db_path: Path = get_wallet_db_path(root_path, config, fingerprint)
 
     assert wallet_db_path == root_path.joinpath("wallet/db/blockchain_wallet_v2_r1_testnet_1234567890.sqlite")
+
+
+@pytest.mark.anyio
+async def test_wallet_has_no_server(
+    simulator_and_wallet: Tuple[List[FullNodeSimulator], List[Tuple[WalletNode, ChiaServer]], BlockTools],
+) -> None:
+    full_nodes, wallets, bt = simulator_and_wallet
+    wallet_node, wallet_server = wallets[0]
+
+    assert wallet_server.webserver is None

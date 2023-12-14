@@ -5,6 +5,7 @@ from typing import Any, List, Optional, Tuple, Type, Union
 
 import pytest
 from clvm.casts import int_from_bytes
+from clvm.EvalError import EvalError
 
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
@@ -13,25 +14,47 @@ from chia.util.ints import uint32, uint64
 from chia.wallet.conditions import (
     CONDITION_DRIVERS,
     CONDITION_DRIVERS_W_ABSTRACTIONS,
+    AggSig,
+    AggSigAmount,
+    AggSigMe,
+    AggSigParent,
+    AggSigParentAmount,
+    AggSigParentPuzzle,
+    AggSigPuzzle,
+    AggSigPuzzleAmount,
+    AggSigUnsafe,
     AssertAnnouncement,
     AssertBeforeHeightAbsolute,
     AssertBeforeHeightRelative,
     AssertBeforeSecondsAbsolute,
     AssertBeforeSecondsRelative,
     AssertCoinAnnouncement,
+    AssertConcurrentPuzzle,
+    AssertConcurrentSpend,
     AssertHeightAbsolute,
     AssertHeightRelative,
+    AssertMyAmount,
+    AssertMyBirthHeight,
+    AssertMyBirthSeconds,
+    AssertMyCoinID,
+    AssertMyParentID,
+    AssertMyPuzzleHash,
     AssertPuzzleAnnouncement,
     AssertSecondsAbsolute,
     AssertSecondsRelative,
     Condition,
     ConditionValidTimes,
     CreateAnnouncement,
+    CreateCoin,
     CreateCoinAnnouncement,
     CreatePuzzleAnnouncement,
+    Remark,
+    ReserveFee,
+    Softfork,
     Timelock,
     UnknownCondition,
     conditions_from_json_dicts,
+    conditions_to_json_dicts,
     parse_conditions_non_consensus,
     parse_timelock_info,
 )
@@ -133,17 +156,12 @@ def test_completeness() -> None:
 def test_condition_serialization(serializations: ConditionSerializations, abstractions: bool) -> None:
     condition_driver: Condition = parse_conditions_non_consensus([serializations.program], abstractions=abstractions)[0]
     if not abstractions:
-        assert (
-            condition_driver
-            == conditions_from_json_dicts(
-                [
-                    {
-                        "opcode": int_from_bytes(serializations.opcode),
-                        "args": {key: args for key, args in zip(serializations.json_keys, serializations.json_args)},
-                    }
-                ]
-            )[0]
-        )
+        json = {
+            "opcode": int_from_bytes(serializations.opcode),
+            "args": {key: args for key, args in zip(serializations.json_keys, serializations.json_args)},
+        }
+        assert condition_driver == conditions_from_json_dicts([json])[0]
+        assert condition_driver == conditions_from_json_dicts(conditions_to_json_dicts([condition_driver]))[0]
     assert not isinstance(condition_driver, UnknownCondition)
     as_program: Program = condition_driver.to_program()
     assert as_program.at("f").atom == serializations.opcode
@@ -247,3 +265,106 @@ def test_timelock_parsing(timelock_info: TimelockInfo) -> None:
     assert timelock_info.parsed_info.to_conditions() == (
         timelock_info.conditions_after if timelock_info.conditions_after is not None else timelock_info.drivers
     )
+
+
+@pytest.mark.parametrize(
+    "cond",
+    [
+        AggSigParent,
+        AggSigPuzzle,
+        AggSigAmount,
+        AggSigPuzzleAmount,
+        AggSigParentAmount,
+        AggSigParentPuzzle,
+        AggSigUnsafe,
+        AggSigMe,
+        CreateCoin,
+        ReserveFee,
+        AssertCoinAnnouncement,
+        CreateCoinAnnouncement,
+        AssertPuzzleAnnouncement,
+        CreatePuzzleAnnouncement,
+        AssertConcurrentSpend,
+        AssertConcurrentPuzzle,
+        AssertMyCoinID,
+        AssertMyParentID,
+        AssertMyPuzzleHash,
+        AssertMyAmount,
+        AssertMyBirthSeconds,
+        AssertMyBirthHeight,
+        AssertSecondsRelative,
+        AssertSecondsAbsolute,
+        AssertHeightRelative,
+        AssertHeightAbsolute,
+        AssertBeforeSecondsRelative,
+        AssertBeforeSecondsAbsolute,
+        AssertBeforeHeightRelative,
+        AssertBeforeHeightAbsolute,
+        Softfork,
+        Remark,
+        UnknownCondition,
+        AggSig,
+        CreateAnnouncement,
+        AssertAnnouncement,
+        Timelock,
+    ],
+)
+@pytest.mark.parametrize(
+    "prg",
+    [
+        bytes([0x80]),
+        bytes([0xFF, 0x80, 0xFF, 0xFF, 0xFF, 0x80, 0x80, 0x80, 0x80]),
+        bytes([0xFF, 0x80, 0xFF, 0xFF, 0x80, 0x80, 0xFF, 0x80, 0x80]),
+        bytes([0xFF, 0x80, 0xFF, 0xFF, 0x80, 0x80, 0xFF, 0x80, 0xFF, 0x80, 0x80]),
+        bytes([0xFF, 0x80, 0xFF, 0xFF, 0x80, 0x80, 0xFF, 0x80, 0xFF, 0x80, 0xFF, 0x80, 0x80]),
+    ],
+)
+def test_invalid_condition(
+    cond: Type[
+        Union[
+            AggSigParent,
+            AggSigPuzzle,
+            AggSigAmount,
+            AggSigPuzzleAmount,
+            AggSigParentAmount,
+            AggSigParentPuzzle,
+            AggSigUnsafe,
+            AggSigMe,
+            CreateCoin,
+            ReserveFee,
+            AssertCoinAnnouncement,
+            CreateCoinAnnouncement,
+            AssertPuzzleAnnouncement,
+            CreatePuzzleAnnouncement,
+            AssertConcurrentSpend,
+            AssertConcurrentPuzzle,
+            AssertMyCoinID,
+            AssertMyParentID,
+            AssertMyPuzzleHash,
+            AssertMyAmount,
+            AssertMyBirthSeconds,
+            AssertMyBirthHeight,
+            AssertSecondsRelative,
+            AssertSecondsAbsolute,
+            AssertHeightRelative,
+            AssertHeightAbsolute,
+            AssertBeforeSecondsRelative,
+            AssertBeforeSecondsAbsolute,
+            AssertBeforeHeightRelative,
+            AssertBeforeHeightAbsolute,
+            Softfork,
+            Remark,
+            UnknownCondition,
+            AggSig,
+            CreateAnnouncement,
+            AssertAnnouncement,
+            Timelock,
+        ]
+    ],
+    prg: bytes,
+) -> None:
+    if (cond == Remark or cond == UnknownCondition) and prg != b"\x80":
+        pytest.skip("condition takes arbitrary arguments")
+
+    with pytest.raises((ValueError, EvalError, KeyError)):
+        cond.from_program(Program.from_bytes(prg))

@@ -7,7 +7,7 @@ import math
 import time
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Set, Tuple, Type, TypeVar, cast
 
-from blspy import AugSchemeMPL, G1Element, G2Element
+from chia_rs import AugSchemeMPL, G1Element, G2Element
 from clvm.casts import int_from_bytes, int_to_bytes
 from typing_extensions import Unpack
 
@@ -19,6 +19,7 @@ from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.coin_spend import CoinSpend, compute_additions
+from chia.types.signing_mode import CHIP_0002_SIGN_MESSAGE_PREFIX, SigningMode
 from chia.types.spend_bundle import SpendBundle
 from chia.util.condition_tools import conditions_dict_for_solution, pkm_pairs_for_conditions_dict
 from chia.util.hash import std_hash
@@ -47,7 +48,7 @@ from chia.wallet.util.compute_memos import compute_memos
 from chia.wallet.util.transaction_type import TransactionType
 from chia.wallet.util.tx_config import CoinSelectionConfig, TXConfig
 from chia.wallet.util.wallet_types import WalletType
-from chia.wallet.wallet import CHIP_0002_SIGN_MESSAGE_PREFIX, Wallet
+from chia.wallet.wallet import Wallet
 from chia.wallet.wallet_coin_record import WalletCoinRecord
 from chia.wallet.wallet_info import WalletInfo
 from chia.wallet.wallet_nft_store import WalletNftStore
@@ -308,7 +309,9 @@ class NFTWallet:
                 self.log.debug("Found a DID wallet, checking did: %r == %r", wallet.get_my_DID(), did_id)
                 if bytes32.fromhex(wallet.get_my_DID()) == did_id:
                     self.log.debug("Creating announcement from DID for nft_ids: %s", nft_ids)
-                    did_bundle = await wallet.create_message_spend(tx_config, puzzle_announcements=nft_ids)
+                    did_bundle = (
+                        await wallet.create_message_spend(tx_config, puzzle_announcements=nft_ids)
+                    ).spend_bundle
                     self.log.debug("Sending DID announcement from puzzle: %s", did_bundle.removals())
                     did_inner_hash = wallet.did_info.current_inner.get_tree_hash()
                     break
@@ -380,7 +383,7 @@ class NFTWallet:
             "Creating transaction for launcher: %s and other coins: %s (%s)", origin, coins, announcement_set
         )
         # store the launcher transaction in the wallet state
-        tx_record: Optional[TransactionRecord] = await self.standard_wallet.generate_signed_transaction(
+        [tx_record] = await self.standard_wallet.generate_signed_transaction(
             uint64(amount),
             nft_puzzles.LAUNCHER_PUZZLE_HASH,
             tx_config,
@@ -400,7 +403,7 @@ class NFTWallet:
 
         eve_coin = Coin(launcher_coin.name(), eve_fullpuz_hash, uint64(amount))
 
-        if tx_record is None or tx_record.spend_bundle is None:
+        if tx_record.spend_bundle is None:
             self.log.error("Couldn't produce a launcher spend")
             return None
 
@@ -544,7 +547,7 @@ class NFTWallet:
         else:
             return puzzle_info
 
-    async def sign_message(self, message: str, nft: NFTCoinInfo, is_hex: bool = False) -> Tuple[G1Element, G2Element]:
+    async def sign_message(self, message: str, nft: NFTCoinInfo, mode: SigningMode) -> Tuple[G1Element, G2Element]:
         uncurried_nft = UncurriedNFT.uncurry(*nft.full_puzzle.uncurry())
         if uncurried_nft is not None:
             p2_puzzle = uncurried_nft.p2_puzzle
@@ -552,11 +555,15 @@ class NFTWallet:
             private = await self.wallet_state_manager.get_private_key(puzzle_hash)
             synthetic_secret_key = calculate_synthetic_secret_key(private, DEFAULT_HIDDEN_PUZZLE_HASH)
             synthetic_pk = synthetic_secret_key.get_g1()
-            if is_hex:
-                puzzle: Program = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, bytes.fromhex(message)))
+            if mode == SigningMode.CHIP_0002_HEX_INPUT:
+                hex_message: bytes = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, bytes.fromhex(message))).get_tree_hash()
+            elif mode == SigningMode.BLS_MESSAGE_AUGMENTATION_UTF8_INPUT:
+                hex_message = bytes(message, "utf-8")
+            elif mode == SigningMode.BLS_MESSAGE_AUGMENTATION_HEX_INPUT:
+                hex_message = bytes.fromhex(message)
             else:
-                puzzle = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, message))
-            return synthetic_pk, AugSchemeMPL.sign(synthetic_secret_key, puzzle.get_tree_hash())
+                hex_message = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, message)).get_tree_hash()
+            return synthetic_pk, AugSchemeMPL.sign(synthetic_secret_key, hex_message)
         else:
             raise ValueError("Invalid NFT puzzle.")
 
@@ -761,7 +768,7 @@ class NFTWallet:
 
         innersol: Program = self.standard_wallet.make_solution(
             primaries=payments,
-            coin_announcements=None if announcement_to_make is None else set((announcement_to_make,)),
+            coin_announcements=None if announcement_to_make is None else {announcement_to_make},
             coin_announcements_to_assert=coin_announcements_bytes,
             puzzle_announcements_to_assert=puzzle_announcements_bytes,
             conditions=extra_conditions,
@@ -949,7 +956,7 @@ class NFTWallet:
                 if wallet.type() == WalletType.STANDARD_WALLET:
                     payments = royalty_payments[asset] if asset in royalty_payments else []
                     payment_sum = sum(p.amount for _, p in payments)
-                    tx = await wallet.generate_signed_transaction(
+                    [tx] = await wallet.generate_signed_transaction(
                         abs(amount),
                         OFFER_MOD_HASH,
                         tx_config,
@@ -1066,7 +1073,7 @@ class NFTWallet:
                                 "0x"
                                 + royalty_coin.parent_coin_info.hex()
                                 + royalty_coin.puzzle_hash.hex()
-                                + bytes(uint64(royalty_coin.amount)).hex()
+                                + uint64(royalty_coin.amount).stream_to_bytes().hex()
                             )
                             parent_spend_hex: str = "0x" + bytes(parent_spend).hex()
                             solver = Solver(
@@ -1252,7 +1259,7 @@ class NFTWallet:
         did_lineage_parent: Optional[bytes32] = None,
         fee: Optional[uint64] = uint64(0),
         extra_conditions: Tuple[Condition, ...] = tuple(),
-    ) -> SpendBundle:
+    ) -> List[TransactionRecord]:
         """
         Minting NFTs from the DID linked wallet, also used for bulk minting NFTs.
         - The DID is spent along with an intermediate launcher puzzle which
@@ -1522,7 +1529,9 @@ class NFTWallet:
 
         # Aggregate everything into a single spend bundle
         total_spend = SpendBundle.aggregate([signed_spend_bundle, xch_spend, *eve_spends])
-        return total_spend
+
+        tx_record: TransactionRecord = dataclasses.replace(eve_txs[0], spend_bundle=total_spend)
+        return [tx_record]
 
     async def mint_from_xch(
         self,
@@ -1535,7 +1544,7 @@ class NFTWallet:
         xch_change_ph: Optional[bytes32] = None,
         fee: Optional[uint64] = uint64(0),
         extra_conditions: Tuple[Condition, ...] = tuple(),
-    ) -> SpendBundle:
+    ) -> List[TransactionRecord]:
         """
         Minting NFTs from a single XCH spend using intermediate launcher puzzle
         :param metadata_list: A list of dicts containing the metadata for each NFT to be minted
@@ -1724,7 +1733,8 @@ class NFTWallet:
 
         # Aggregate everything into a single spend bundle
         total_spend = SpendBundle.aggregate([signed_spend_bundle, xch_spend, *eve_spends])
-        return total_spend
+        tx_record: TransactionRecord = dataclasses.replace(eve_txs[0], spend_bundle=total_spend)
+        return [tx_record]
 
     async def select_coins(
         self,

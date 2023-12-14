@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, cast
@@ -25,20 +23,17 @@ from chia.daemon.keychain_server import (
 )
 from chia.daemon.server import WebSocketServer, plotter_log_path, service_plotter
 from chia.plotters.plotters import call_plotters
-from chia.server.outbound_message import NodeType
 from chia.simulator.block_tools import BlockTools
 from chia.simulator.keyring import TempKeyring
-from chia.simulator.time_out_assert import time_out_assert, time_out_assert_custom_interval
-from chia.types.peer_info import PeerInfo
+from chia.simulator.setup_services import setup_full_node
 from chia.util.config import load_config
-from chia.util.ints import uint16
 from chia.util.json_util import dict_to_json_str
 from chia.util.keychain import Keychain, KeyData, supports_os_passphrase_storage
 from chia.util.keyring_wrapper import DEFAULT_PASSPHRASE_IF_NO_MASTER_PASSPHRASE, KeyringWrapper
 from chia.util.ws_message import create_payload, create_payload_dict
 from chia.wallet.derive_keys import master_sk_to_farmer_sk, master_sk_to_pool_sk
-from tests.core.node_height import node_height_at_least
 from tests.util.misc import Marks, datacases
+from tests.util.time_out_assert import time_out_assert_not_none
 
 chiapos_version = pkg_resources.get_distribution("chiapos").version
 
@@ -313,7 +308,9 @@ def assert_response(
     assert message["data"] == expected_response_data
 
 
-def assert_response_success_only(response: aiohttp.http_websocket.WSMessage, request_id: Optional[str] = None) -> None:
+def assert_response_success_only(
+    response: aiohttp.http_websocket.WSMessage, request_id: Optional[str] = None
+) -> Dict[str, Any]:
     # Expect: JSON response
     assert response.type == aiohttp.WSMsgType.TEXT
     message = json.loads(response.data.strip())
@@ -321,6 +318,7 @@ def assert_response_success_only(response: aiohttp.http_websocket.WSMessage, req
     if request_id is not None:
         assert message["request_id"] == request_id
     assert message["data"]["success"] is True
+    return message
 
 
 def assert_running_services_response(response_dict: Dict[str, Any], expected_response_dict: Dict[str, Any]) -> None:
@@ -411,70 +409,45 @@ async def daemon_client_with_config_and_keys(get_keychain_for_function, get_daem
     return client
 
 
-@pytest.mark.asyncio
-async def test_daemon_simulation(self_hostname, daemon_simulation):
-    deamon_and_nodes, get_b_tools, bt = daemon_simulation
-    node1, node2, _, _, _, _, _, _, _, _, daemon1 = deamon_and_nodes
-    server1 = node1.full_node.server
-    node2_port = node2.full_node.server.get_port()
-    await server1.start_client(PeerInfo(self_hostname, uint16(node2_port)))
+@pytest.mark.anyio
+async def test_daemon_passthru(get_daemon, bt):
+    ws_server = get_daemon
+    config = bt.config
+    daemon_port = config["daemon_port"]
 
-    async def num_connections():
-        count = len(node2.server.get_connections(NodeType.FULL_NODE))
-        return count
+    async with aiohttp.ClientSession() as client:
+        async with client.ws_connect(
+            f"wss://127.0.0.1:{daemon_port}",
+            autoclose=True,
+            autoping=True,
+            ssl_context=bt.get_daemon_ssl_context(),
+            max_msg_size=100 * 1024 * 1024,
+        ) as ws:
+            service_name = "test_service_name"
+            data = {"service": service_name}
+            payload = create_payload("register_service", data, service_name, "daemon")
+            await ws.send_str(payload)
+            assert_response_success_only(await ws.receive())
 
-    await time_out_assert_custom_interval(60, 1, num_connections, 1)
+            async with setup_full_node(
+                consensus_constants=bt.constants,
+                db_name="sim-test.db",
+                self_hostname="localhost",
+                local_bt=bt,
+                simulator=False,
+                db_version=2,
+                connect_to_daemon=True,
+            ) as _:
+                await time_out_assert_not_none(30, ws_server.connections.get, "chia_full_node")
 
-    await time_out_assert(1500, node_height_at_least, True, node2, 1)
+                payload = create_payload("get_blockchain_state", {}, service_name, "chia_full_node")
+                await ws.send_str(payload)
 
-    session = aiohttp.ClientSession()
-
-    log = logging.getLogger()
-    log.warning(f"Connecting to daemon on port {daemon1.daemon_port}")
-    ws = await session.ws_connect(
-        f"wss://127.0.0.1:{daemon1.daemon_port}",
-        autoclose=True,
-        autoping=True,
-        ssl_context=get_b_tools.get_daemon_ssl_context(),
-        max_msg_size=100 * 1024 * 1024,
-    )
-    service_name = "test_service_name"
-    data = {"service": service_name}
-    payload = create_payload("register_service", data, service_name, "daemon")
-    await ws.send_str(payload)
-    message_queue: asyncio.Queue = asyncio.Queue()
-
-    async def reader(ws, queue):
-        while True:
-            # ClientWebSocketReponse::receive() internally handles PING, PONG, and CLOSE messages
-            msg = await ws.receive()
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                message = msg.data.strip()
-                message = json.loads(message)
-                await queue.put(message)
-            else:
-                if msg.type == aiohttp.WSMsgType.ERROR:
-                    await ws.close()
-                elif msg.type == aiohttp.WSMsgType.CLOSED:
-                    pass
-
-                break
-
-    read_handler = asyncio.create_task(reader(ws, message_queue))
-    data = {}
-    payload = create_payload("get_blockchain_state", data, service_name, "chia_full_node")
-    await ws.send_str(payload)
-
-    await asyncio.sleep(5)
-    blockchain_state_found = False
-    while not message_queue.empty():
-        message = await message_queue.get()
-        if message["command"] == "get_blockchain_state":
-            blockchain_state_found = True
-
-    await ws.close()
-    read_handler.cancel()
-    assert blockchain_state_found
+                response = await ws.receive()
+                message = assert_response_success_only(response)
+                assert message["command"] == "get_blockchain_state"
+                assert message["origin"] == "chia_full_node"
+                assert message["data"]["blockchain_state"]["genesis_challenge_initialized"] is True
 
 
 @pytest.mark.parametrize(
@@ -557,14 +530,14 @@ def test_is_service_running_with_services_and_connections(
     assert daemon.is_service_running(service) == expected_result
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_running_services_no_services(mock_lonely_daemon):
     daemon = mock_lonely_daemon
     response = await daemon.running_services()
     assert_running_services_response(response, {"success": True, "running_services": []})
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_running_services_with_services(mock_daemon_with_services):
     daemon = mock_daemon_with_services
     response = await daemon.running_services()
@@ -573,7 +546,7 @@ async def test_running_services_with_services(mock_daemon_with_services):
     )
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_running_services_with_services_and_connections(mock_daemon_with_services_and_connections):
     daemon = mock_daemon_with_services_and_connections
     response = await daemon.running_services()
@@ -582,7 +555,7 @@ async def test_running_services_with_services_and_connections(mock_daemon_with_s
     )
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_routes(mock_lonely_daemon):
     daemon = mock_lonely_daemon
     response = await daemon.get_routes({})
@@ -681,7 +654,7 @@ async def test_get_routes(mock_lonely_daemon):
         pubkeys_only=True,
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_wallet_addresses(
     mock_daemon_with_config_and_keys,
     monkeypatch,
@@ -745,7 +718,7 @@ async def test_get_wallet_addresses(
         },
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_keys_for_plotting(
     mock_daemon_with_config_and_keys,
     monkeypatch,
@@ -762,7 +735,7 @@ async def test_get_keys_for_plotting(
         response={},
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_keys_for_plotting_error(
     mock_daemon_with_config_and_keys,
     monkeypatch,
@@ -773,9 +746,9 @@ async def test_get_keys_for_plotting_error(
         await daemon.get_keys_for_plotting(case.request)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_keys_for_plotting_client(daemon_client_with_config_and_keys):
-    client = await daemon_client_with_config_and_keys
+    client = daemon_client_with_config_and_keys
     response = await client.get_keys_for_plotting()
     assert response["data"]["success"] is True
     assert len(response["data"]["keys"]) == 2
@@ -789,7 +762,7 @@ async def test_get_keys_for_plotting_client(daemon_client_with_config_and_keys):
     await client.close()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "service_request, expected_result, expected_exception",
     [
@@ -811,7 +784,7 @@ async def test_is_running_no_services(mock_lonely_daemon, service_request, expec
         assert response == expected_result
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "service_request, expected_result, expected_exception",
     [
@@ -850,7 +823,7 @@ async def test_is_running_with_services(
         assert response == expected_result
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "service_request, expected_result, expected_exception",
     [
@@ -894,7 +867,7 @@ async def test_is_running_with_services_and_connections(
         assert response == expected_result
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_validate_keyring_passphrase_rpc(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -942,7 +915,7 @@ async def test_validate_keyring_passphrase_rpc(daemon_connection_and_temp_keycha
     assert_response(await ws.receive(), empty_passphrase_response_data)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_add_private_key(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -998,7 +971,7 @@ async def test_add_private_key(daemon_connection_and_temp_keychain):
     assert_response(await ws.receive(), invalid_mnemonic_response_data)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_add_private_key_label(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -1035,7 +1008,7 @@ async def test_add_private_key_label(daemon_connection_and_temp_keychain):
     )
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_key(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -1069,7 +1042,7 @@ async def test_get_key(daemon_connection_and_temp_keychain):
     assert_response(await ws.receive(), fingerprint_not_found_response_data(123456))
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_keys(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -1100,7 +1073,7 @@ async def test_get_keys(daemon_connection_and_temp_keychain):
         assert_response(await ws.receive(), get_keys_response_data(keys_added))
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_public_key(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -1122,7 +1095,7 @@ async def test_get_public_key(daemon_connection_and_temp_keychain):
         assert key in allowed_keys, f"Unexpected key '{key}' found in response."
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_public_keys(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -1151,7 +1124,7 @@ async def test_get_public_keys(daemon_connection_and_temp_keychain):
             assert key in allowed_keys, f"Unexpected key '{key}' found in response."
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_key_renaming(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
     keychain.add_private_key(test_key_data.mnemonic_str())
@@ -1175,7 +1148,7 @@ async def test_key_renaming(daemon_connection_and_temp_keychain):
         )
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_key_label_deletion(daemon_connection_and_temp_keychain):
     ws, keychain = daemon_connection_and_temp_keychain
 
@@ -1248,7 +1221,7 @@ async def test_key_label_deletion(daemon_connection_and_temp_keychain):
         ),
     ],
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_key_label_methods(
     daemon_connection_and_temp_keychain, method: str, parameter: Dict[str, Any], response_data_dict: Dict[str, Any]
 ) -> None:
@@ -1258,7 +1231,7 @@ async def test_key_label_methods(
     assert_response(await ws.receive(), response_data_dict)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_bad_json(daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain]) -> None:
     ws, _ = daemon_connection_and_temp_keychain
 
@@ -1356,7 +1329,7 @@ async def test_bad_json(daemon_connection_and_temp_keychain: Tuple[aiohttp.Clien
         },
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_misc_daemon_ws(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain],
     case: RouteCase,
@@ -1370,7 +1343,7 @@ async def test_misc_daemon_ws(
     assert_response(response, case.response)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_unexpected_json(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain]
 ) -> None:
@@ -1390,7 +1363,7 @@ async def test_unexpected_json(
     "command_to_test",
     [("start_service"), ("stop_service"), ("start_plotting"), ("stop_plotting"), ("is_running"), ("register_service")],
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_commands_with_no_data(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain], command_to_test: str
 ) -> None:
@@ -1434,7 +1407,7 @@ async def test_commands_with_no_data(
         response={"success": True, "error": None},
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_set_keyring_passphrase_ws(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain],
     case: RouteCase,
@@ -1537,7 +1510,7 @@ async def test_set_keyring_passphrase_ws(
         response={"success": True, "error": None},
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_passphrase_apis(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain],
     case: RouteCase,
@@ -1574,7 +1547,7 @@ async def test_passphrase_apis(
         response={"success": False, "error": "validation exception"},
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_keyring_file_deleted(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain],
     case: RouteCase,
@@ -1632,7 +1605,7 @@ async def test_keyring_file_deleted(
         },
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_plotter_errors(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain], case: RouteCase
 ) -> None:
@@ -1745,7 +1718,7 @@ async def test_plotter_errors(
         },
     ),
 )
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_plotter_options(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain],
     get_b_tools: BlockTools,
@@ -1811,7 +1784,7 @@ def check_plot_queue_log(
     return plot_info["log_new"].startswith(expected_log_entry)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_plotter_roundtrip(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain], get_b_tools: BlockTools
 ) -> None:
@@ -1883,7 +1856,7 @@ async def test_plotter_roundtrip(
     assert_plot_queue_response(response, "state_changed", "state_changed", plot_id, "FINISHED")
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_plotter_stop_plotting(
     daemon_connection_and_temp_keychain: Tuple[aiohttp.ClientWebSocketResponse, Keychain], get_b_tools: BlockTools
 ) -> None:

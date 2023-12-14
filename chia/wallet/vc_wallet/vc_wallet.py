@@ -6,7 +6,7 @@ import time
 import traceback
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Type, TypeVar, Union
 
-from blspy import G1Element, G2Element
+from chia_rs import G1Element, G2Element
 from clvm.casts import int_to_bytes
 from typing_extensions import Unpack
 
@@ -279,7 +279,7 @@ class VCWallet:
                 fee, tx_config, Announcement(vc_record.vc.coin.name(), announcement_to_make)
             )
             if coin_announcements is None:
-                coin_announcements = set((announcement_to_make,))
+                coin_announcements = {announcement_to_make}
             else:
                 coin_announcements.add(announcement_to_make)  # pragma: no cover
         else:
@@ -315,6 +315,7 @@ class VCWallet:
         )
         did_announcement, coin_spend, vc = vc_record.vc.do_spend(inner_puzzle, innersol, new_proof_hash)
         spend_bundles = [await self.wallet_state_manager.sign_transaction([coin_spend])]
+        tx_list: List[TransactionRecord] = []
         if did_announcement is not None:
             # Need to spend DID
             for _, wallet in self.wallet_state_manager.wallets.items():
@@ -322,23 +323,24 @@ class VCWallet:
                     assert isinstance(wallet, DIDWallet)
                     if bytes32.fromhex(wallet.get_my_DID()) == vc_record.vc.proof_provider:
                         self.log.debug("Creating announcement from DID for vc: %s", vc_id.hex())
-                        did_bundle = await wallet.create_message_spend(
+                        did_tx = await wallet.create_message_spend(
                             tx_config, puzzle_announcements={bytes(did_announcement)}
                         )
-                        spend_bundles.append(did_bundle)
+                        assert did_tx.spend_bundle is not None
+                        spend_bundles.append(did_tx.spend_bundle)
+                        tx_list.append(dataclasses.replace(did_tx, spend_bundle=None))
                         break
             else:
                 raise ValueError(
                     f"Cannot find the required DID {vc_record.vc.proof_provider.hex()}."
                 )  # pragma: no cover
-        tx_list: List[TransactionRecord] = []
+        add_list: List[Coin] = list(spend_bundles[0].additions())
+        rem_list: List[Coin] = list(spend_bundles[0].removals())
         if chia_tx is not None and chia_tx.spend_bundle is not None:
             spend_bundles.append(chia_tx.spend_bundle)
             tx_list.append(dataclasses.replace(chia_tx, spend_bundle=None))
         spend_bundle = SpendBundle.aggregate(spend_bundles)
         now = uint64(int(time.time()))
-        add_list: List[Coin] = list(spend_bundle.additions())
-        rem_list: List[Coin] = list(spend_bundle.removals())
         tx_list.append(
             TransactionRecord(
                 confirmed_at_height=uint32(0),
@@ -412,43 +414,27 @@ class VCWallet:
 
         # Assemble final bundle
         expected_did_announcement, vc_spend = vc.activate_backdoor(provider_inner_puzhash, announcement_nonce=nonce)
-        did_spend: SpendBundle = await did_wallet.create_message_spend(
+        did_tx: TransactionRecord = await did_wallet.create_message_spend(
             tx_config,
             puzzle_announcements={expected_did_announcement},
             coin_announcements_to_assert={vc_announcement},
             extra_conditions=extra_conditions,
         )
-        final_bundle: SpendBundle = SpendBundle.aggregate([SpendBundle([vc_spend], G2Element()), did_spend])
-        tx: TransactionRecord = TransactionRecord(
-            confirmed_at_height=uint32(0),
-            created_at_time=uint64(int(time.time())),
-            to_puzzle_hash=vc.inner_puzzle_hash,
-            amount=uint64(1),
-            fee_amount=uint64(fee),
-            confirmed=False,
-            sent=uint32(0),
-            spend_bundle=final_bundle,
-            additions=list(final_bundle.additions()),
-            removals=list(final_bundle.removals()),
-            wallet_id=self.id(),
-            sent_to=[],
-            trade_id=None,
-            type=uint32(TransactionType.OUTGOING_TX.value),
-            name=final_bundle.name(),
-            memos=list(compute_memos(final_bundle).items()),
-            valid_times=parse_timelock_info(extra_conditions),
-        )
+        assert did_tx.spend_bundle is not None
+        final_bundle: SpendBundle = SpendBundle.aggregate([SpendBundle([vc_spend], G2Element()), did_tx.spend_bundle])
+        did_tx = dataclasses.replace(did_tx, spend_bundle=final_bundle, name=final_bundle.name())
         if fee > 0:
             chia_tx: TransactionRecord = await self.wallet_state_manager.main_wallet.create_tandem_xch_tx(
                 fee, tx_config, vc_announcement
             )
-            assert tx.spend_bundle is not None
+            assert did_tx.spend_bundle is not None
             assert chia_tx.spend_bundle is not None
-            tx = dataclasses.replace(tx, spend_bundle=SpendBundle.aggregate([chia_tx.spend_bundle, tx.spend_bundle]))
+            new_bundle = SpendBundle.aggregate([chia_tx.spend_bundle, did_tx.spend_bundle])
+            did_tx = dataclasses.replace(did_tx, spend_bundle=new_bundle, name=new_bundle.name())
             chia_tx = dataclasses.replace(chia_tx, spend_bundle=None)
-            return [tx, chia_tx]
+            return [did_tx, chia_tx]
         else:
-            return [tx]  # pragma: no cover
+            return [did_tx]  # pragma: no cover
 
     async def add_vc_authorization(self, offer: Offer, solver: Solver, tx_config: TXConfig) -> Tuple[Offer, Solver]:
         """
@@ -509,21 +495,23 @@ class VCWallet:
             for cc in [c for c in crcat_spend.inner_conditions if c.at("f").as_int() == 51]:
                 if not (
                     (  # it's coming to us
-                        await self.wallet_state_manager.get_wallet_identifier_for_puzzle_hash(bytes32(cc.at("rf").atom))
+                        await self.wallet_state_manager.get_wallet_identifier_for_puzzle_hash(
+                            bytes32(cc.at("rf").as_atom())
+                        )
                         is not None
                     )
                     or (  # it's going back where it came from
-                        bytes32(cc.at("rf").atom) == crcat_spend.crcat.inner_puzzle_hash
+                        bytes32(cc.at("rf").as_atom()) == crcat_spend.crcat.inner_puzzle_hash
                     )
                     or (  # it's going to the pending state
                         cc.at("rrr") != Program.to(None)
                         and cc.at("rrrf").atom is None
-                        and bytes32(cc.at("rf").atom)
+                        and bytes32(cc.at("rf").as_atom())
                         == construct_pending_approval_state(
-                            bytes32(cc.at("rrrff").atom), uint64(cc.at("rrf").as_int())
+                            bytes32(cc.at("rrrff").as_atom()), uint64(cc.at("rrf").as_int())
                         ).get_tree_hash()
                     )
-                    or bytes32(cc.at("rf").atom) == Offer.ph()  # it's going to the offer mod
+                    or bytes32(cc.at("rf").as_atom()) == Offer.ph()  # it's going to the offer mod
                 ):
                     outputs_ok = False  # pragma: no cover
             if our_crcat or outputs_ok:

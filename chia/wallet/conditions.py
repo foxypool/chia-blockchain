@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, final
+from dataclasses import dataclass, fields, replace
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, final, get_type_hints
 
-from blspy import G1Element
-from clvm.casts import int_to_bytes
+from chia_rs import G1Element
+from clvm.casts import int_from_bytes, int_to_bytes
 
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
@@ -37,14 +37,14 @@ class AggSigParent(Condition):
     parent_id: Optional[bytes32] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PARENT, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PARENT, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
     def from_program(cls, program: Program, parent_id: Optional[bytes32] = None) -> AggSigParent:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             parent_id,
         )
 
@@ -58,14 +58,14 @@ class AggSigPuzzle(Condition):
     puzzle_hash: Optional[bytes32] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PUZZLE, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PUZZLE, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
     def from_program(cls, program: Program, puzzle_hash: Optional[bytes32] = None) -> AggSigPuzzle:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             puzzle_hash,
         )
 
@@ -79,14 +79,14 @@ class AggSigAmount(Condition):
     amount: Optional[uint64] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_AMOUNT, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_AMOUNT, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
     def from_program(cls, program: Program, amount: Optional[uint64] = None) -> AggSigAmount:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             amount,
         )
 
@@ -101,7 +101,7 @@ class AggSigPuzzleAmount(Condition):
     amount: Optional[uint64] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PUZZLE_AMOUNT, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PUZZLE_AMOUNT, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
@@ -112,8 +112,8 @@ class AggSigPuzzleAmount(Condition):
         amount: Optional[uint64] = None,
     ) -> AggSigPuzzleAmount:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             puzzle_hash,
             amount,
         )
@@ -129,7 +129,7 @@ class AggSigParentAmount(Condition):
     amount: Optional[uint64] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PARENT_AMOUNT, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PARENT_AMOUNT, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
@@ -140,8 +140,8 @@ class AggSigParentAmount(Condition):
         amount: Optional[uint64] = None,
     ) -> AggSigParentAmount:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             parent_id,
             amount,
         )
@@ -157,7 +157,7 @@ class AggSigParentPuzzle(Condition):
     puzzle_hash: Optional[bytes32] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PARENT_PUZZLE, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_PARENT_PUZZLE, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
@@ -168,8 +168,8 @@ class AggSigParentPuzzle(Condition):
         puzzle_hash: Optional[bytes32] = None,
     ) -> AggSigParentPuzzle:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             parent_id,
             puzzle_hash,
         )
@@ -183,14 +183,14 @@ class AggSigUnsafe(Condition):
     msg: bytes
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_UNSAFE, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_UNSAFE, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
     def from_program(cls, program: Program) -> AggSigUnsafe:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
         )
 
 
@@ -204,7 +204,7 @@ class AggSigMe(Condition):
     additional_data: Optional[bytes32] = None
 
     def to_program(self) -> Program:
-        condition: Program = Program.to([ConditionOpcode.AGG_SIG_ME, self.pubkey, self.msg])
+        condition: Program = Program.to([ConditionOpcode.AGG_SIG_ME, self.pubkey.to_bytes(), self.msg])
         return condition
 
     @classmethod
@@ -215,8 +215,8 @@ class AggSigMe(Condition):
         additional_data: Optional[bytes32] = None,
     ) -> AggSigMe:
         return cls(
-            G1Element.from_bytes(program.at("rf").atom),
-            program.at("rrf").atom,
+            G1Element.from_bytes(program.at("rf").as_atom()),
+            program.at("rrf").as_atom(),
             coin_id,
             additional_data,
         )
@@ -241,9 +241,11 @@ class CreateCoin(Condition):
     def from_program(cls, program: Program) -> CreateCoin:
         potential_memos: Program = program.at("rrr")
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
             uint64(program.at("rrf").as_int()),
-            None if potential_memos == Program.to(None) else [memo.atom for memo in potential_memos.at("f").as_iter()],
+            None
+            if potential_memos == Program.to(None)
+            else [memo.as_atom() for memo in potential_memos.at("f").as_iter()],
         )
 
 
@@ -302,7 +304,7 @@ class AssertCoinAnnouncement(Condition):
         asserted_msg: Optional[bytes] = None,
     ) -> AssertCoinAnnouncement:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
             asserted_id,
             asserted_msg,
         )
@@ -328,7 +330,7 @@ class CreateCoinAnnouncement(Condition):
     @classmethod
     def from_program(cls, program: Program, coin_id: Optional[bytes32] = None) -> CreateCoinAnnouncement:
         return cls(
-            program.at("rf").atom,
+            program.at("rf").as_atom(),
             coin_id,
         )
 
@@ -371,7 +373,7 @@ class AssertPuzzleAnnouncement(Condition):
         asserted_msg: Optional[bytes] = None,
     ) -> AssertPuzzleAnnouncement:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
             asserted_ph,
             asserted_msg,
         )
@@ -397,7 +399,7 @@ class CreatePuzzleAnnouncement(Condition):
     @classmethod
     def from_program(cls, program: Program, puzzle_hash: Optional[bytes32] = None) -> CreatePuzzleAnnouncement:
         return cls(
-            program.at("rf").atom,
+            program.at("rf").as_atom(),
             puzzle_hash,
         )
 
@@ -415,7 +417,7 @@ class AssertConcurrentSpend(Condition):
     @classmethod
     def from_program(cls, program: Program) -> AssertConcurrentSpend:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
         )
 
 
@@ -432,7 +434,7 @@ class AssertConcurrentPuzzle(Condition):
     @classmethod
     def from_program(cls, program: Program) -> AssertConcurrentPuzzle:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
         )
 
 
@@ -449,7 +451,7 @@ class AssertMyCoinID(Condition):
     @classmethod
     def from_program(cls, program: Program) -> AssertMyCoinID:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
         )
 
 
@@ -466,7 +468,7 @@ class AssertMyParentID(Condition):
     @classmethod
     def from_program(cls, program: Program) -> AssertMyParentID:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
         )
 
 
@@ -483,7 +485,7 @@ class AssertMyPuzzleHash(Condition):
     @classmethod
     def from_program(cls, program: Program) -> AssertMyPuzzleHash:
         return cls(
-            bytes32(program.at("rf").atom),
+            bytes32(program.at("rf").as_atom()),
         )
 
 
@@ -757,11 +759,11 @@ class AggSig(Condition):
 
     def to_program(self) -> Program:
         # We know we are an agg sig or we want to error
-        return CONDITION_DRIVERS[self.opcode](self.pubkey, self.msg).to_program()  # type: ignore[call-arg]
+        return CONDITION_DRIVERS[self.opcode](self.pubkey.to_bytes(), self.msg).to_program()  # type: ignore[call-arg]
 
     @classmethod
     def from_program(cls, program: Program, **kwargs: Optional[Union[uint64, bytes32]]) -> AggSig:
-        opcode: bytes = program.at("f").atom
+        opcode: bytes = program.at("f").as_atom()
         condition_driver: Condition = CONDITION_DRIVERS[opcode].from_program(program, **kwargs)
         return cls(
             # We are either parsing an agg sig condition, all of which have these, or we want to error
@@ -794,7 +796,7 @@ class CreateAnnouncement(Condition):
 
     @classmethod
     def from_program(cls, program: Program, **kwargs: Optional[bytes32]) -> CreateAnnouncement:
-        if program.at("f").atom == ConditionOpcode.CREATE_COIN_ANNOUNCEMENT:
+        if program.at("f").as_atom() == ConditionOpcode.CREATE_COIN_ANNOUNCEMENT:
             coin_not_puzzle: bool = True
             condition: Union[CreateCoinAnnouncement, CreatePuzzleAnnouncement] = CreateCoinAnnouncement.from_program(
                 program, **kwargs
@@ -848,7 +850,7 @@ class AssertAnnouncement(Condition):
 
     @classmethod
     def from_program(cls, program: Program, **kwargs: Optional[bytes32]) -> AssertAnnouncement:
-        if program.at("f").atom == ConditionOpcode.ASSERT_COIN_ANNOUNCEMENT:
+        if program.at("f").as_atom() == ConditionOpcode.ASSERT_COIN_ANNOUNCEMENT:
             coin_not_puzzle: bool = True
             condition: Union[AssertCoinAnnouncement, AssertPuzzleAnnouncement] = AssertCoinAnnouncement.from_program(
                 program, **kwargs
@@ -1022,7 +1024,7 @@ class Timelock(Condition):
 
     @classmethod
     def from_program(cls, program: Program) -> Timelock:
-        opcode: bytes = program.at("f").atom
+        opcode: bytes = program.at("f").as_atom()
         if opcode in AFTER_TIMELOCK_OPCODES:
             after_not_before = True
         else:
@@ -1081,6 +1083,7 @@ CONDITION_DRIVERS: Dict[bytes, Type[Condition]] = {
     ConditionOpcode.SOFTFORK.value: Softfork,
     ConditionOpcode.REMARK.value: Remark,
 }
+DRIVERS_TO_OPCODES: Dict[Type[Condition], bytes] = {v: k for k, v in CONDITION_DRIVERS.items()}
 
 
 CONDITION_DRIVERS_W_ABSTRACTIONS: Dict[bytes, Type[Condition]] = {
@@ -1130,7 +1133,7 @@ def parse_conditions_non_consensus(
     final_condition_list: List[Condition] = []
     for condition in conditions:
         try:
-            final_condition_list.append(driver_dictionary[condition.at("f").atom].from_program(condition))
+            final_condition_list.append(driver_dictionary[condition.at("f").as_atom()].from_program(condition))
         except Exception:
             final_condition_list.append(UnknownCondition.from_program(condition))
 
@@ -1159,6 +1162,16 @@ def conditions_from_json_dicts(conditions: Iterable[Dict[str, Any]]) -> List[Con
             final_condition_list.append(UnknownCondition.from_json_dict(condition))
 
     return final_condition_list
+
+
+def conditions_to_json_dicts(conditions: Iterable[Condition]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "opcode": int_from_bytes(DRIVERS_TO_OPCODES[condition.__class__]),
+            "args": condition.to_json_dict(),
+        }
+        for condition in conditions
+    ]
 
 
 @streamable
@@ -1193,6 +1206,14 @@ class ConditionValidTimes(Streamable):
             final_condition_list.append(AssertBeforeHeightAbsolute(self.max_height))
 
         return final_condition_list
+
+
+condition_valid_times_hints = get_type_hints(ConditionValidTimes)
+condition_valid_times_types: Dict[str, Type[int]] = {}
+for field in fields(ConditionValidTimes):
+    hint = condition_valid_times_hints[field.name]
+    [type_] = [type_ for type_ in hint.__args__ if type_ is not type(None)]
+    condition_valid_times_types[field.name] = type_
 
 
 # Properties of the dataclass above, grouped by their property
@@ -1252,6 +1273,9 @@ def parse_timelock_info(conditions: Iterable[Condition]) -> ConditionValidTimes:
         else:
             new_value = timelock.timestamp
 
-        valid_times = replace(valid_times, **{final_property: new_value})
+        final_type = condition_valid_times_types[final_property]
+        replacement: Dict[str, int] = {final_property: final_type(new_value)}
+        # the type is enforced above
+        valid_times = replace(valid_times, **replacement)  # type: ignore[arg-type]
 
     return valid_times
