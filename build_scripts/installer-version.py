@@ -5,6 +5,10 @@ from setuptools_scm import get_version
 
 # example: 1.0b5.dev225
 def main() -> None:
+
+    print("2.1.3+og-1.5.0")
+    return
+
     scm_full_version = get_version(root="..", relative_to=__file__)
     # scm_full_version = "1.0.5.dev22"
 
