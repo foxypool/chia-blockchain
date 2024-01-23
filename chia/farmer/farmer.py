@@ -105,7 +105,7 @@ def increment_pool_stats(
     return
 
 
-DEFAULT_OG_POOL_URL: str = "https://farmer.chia-og.foxypool.io"
+DEFAULT_OG_POOL_URL: str = "https://farmer-chia-og.foxypool.io"
 
 """
 HARVESTER PROTOCOL (FARMER <-> HARVESTER)
