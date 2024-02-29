@@ -32,10 +32,10 @@ from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.serialized_program import SerializedProgram
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.clvm_cost import CLVMCost
-from chia.types.coin_spend import CoinSpend
+from chia.types.coin_spend import CoinSpend, make_spend
 from chia.types.condition_opcodes import ConditionOpcode
 from chia.types.condition_with_args import ConditionWithArgs
-from chia.types.eligible_coin_spends import run_for_cost
+from chia.types.eligible_coin_spends import UnspentLineageInfo, run_for_cost
 from chia.types.fee_rate import FeeRate
 from chia.types.generator_types import BlockGenerator
 from chia.types.mempool_inclusion_status import MempoolInclusionStatus
@@ -100,7 +100,7 @@ def make_item(idx: int, cost: uint64 = uint64(80), assert_height=100) -> Mempool
     return MempoolItem(
         SpendBundle([], G2Element()),
         uint64(0),
-        NPCResult(None, SpendBundleConditions([], 0, 0, 0, None, None, [], cost, 0, 0), cost),
+        NPCResult(None, SpendBundleConditions([], 0, 0, 0, None, None, [], cost, 0, 0)),
         spend_bundle_name,
         uint32(0),
         assert_height,
@@ -310,8 +310,7 @@ class TestMempool:
         mempool = Mempool(mempool_info, fee_estimator)
         assert mempool.get_min_fee_rate(104000) == 0
 
-        with pytest.raises(ValueError):
-            mempool.get_min_fee_rate(max_mempool_cost + 1)
+        assert mempool.get_min_fee_rate(max_mempool_cost + 1) is None
 
         coin = await next_block(full_node_1, wallet_a, bt)
         spend_bundle = generate_test_spend_bundle(wallet_a, coin)
@@ -2135,7 +2134,8 @@ class TestGeneratorConditions:
             height=softfork_height,
         )
         assert npc_result.error is None
-        assert npc_result.cost == generator_base_cost + 95 * COST_PER_BYTE + ConditionCost.CREATE_COIN.value
+        assert npc_result.conds is not None
+        assert npc_result.conds.cost == generator_base_cost + 95 * COST_PER_BYTE + ConditionCost.CREATE_COIN.value
         assert len(npc_result.conds.spends) == 1
         assert len(npc_result.conds.spends[0].create_coin) == 1
 
@@ -2187,7 +2187,8 @@ class TestGeneratorConditions:
             height=softfork_height,
         )
         assert npc_result.error is None
-        assert npc_result.cost == generator_base_cost + 117 * COST_PER_BYTE + expected_cost
+        assert npc_result.conds is not None
+        assert npc_result.conds.cost == generator_base_cost + 117 * COST_PER_BYTE + expected_cost
         assert len(npc_result.conds.spends) == 1
 
         # if we subtract one from max cost, this should fail
@@ -2663,7 +2664,7 @@ class TestMaliciousGenerators:
         cs = spend_bundle.coin_spends[0]
         c = cs.coin
         coin_0 = Coin(c.parent_coin_info, bytes32([1] * 32), c.amount)
-        coin_spend_0 = CoinSpend(coin_0, cs.puzzle_reveal, cs.solution)
+        coin_spend_0 = make_spend(coin_0, cs.puzzle_reveal, cs.solution)
         new_bundle = recursive_replace(spend_bundle, "coin_spends", [coin_spend_0] + spend_bundle.coin_spends[1:])
         assert spend_bundle is not None
         res = await full_node_1.full_node.add_transaction(new_bundle, new_bundle.name(), test=True)
@@ -2907,9 +2908,13 @@ def test_get_items_by_coin_ids(items: List[MempoolItem], coin_ids: List[bytes32]
     assert set(result) == set(expected)
 
 
-def test_aggregating_on_a_solution_then_a_more_cost_saving_one_appears() -> None:
+@pytest.mark.anyio
+async def test_aggregating_on_a_solution_then_a_more_cost_saving_one_appears() -> None:
     def always(_: bytes32) -> bool:
         return True
+
+    async def get_unspent_lineage_info_for_puzzle_hash(_: bytes32) -> Optional[UnspentLineageInfo]:
+        assert False  # pragma: no cover
 
     def make_test_spendbundle(coin: Coin, *, fee: int = 0, with_higher_cost: bool = False) -> SpendBundle:
         conditions = []
@@ -2939,7 +2944,7 @@ def test_aggregating_on_a_solution_then_a_more_cost_saving_one_appears() -> None
     )
     mempool = Mempool(mempool_info, fee_estimator)
     coins = [
-        Coin(IDENTITY_PUZZLE_HASH, IDENTITY_PUZZLE_HASH, uint64(amount)) for amount in range(2000000000, 2000000010)
+        Coin(IDENTITY_PUZZLE_HASH, IDENTITY_PUZZLE_HASH, uint64(amount)) for amount in range(2000000000, 2000000020, 2)
     ]
     # Create a ~10 FPC item that spends the eligible coin[0]
     sb_A = make_test_spendbundle(coins[0])
@@ -2951,7 +2956,9 @@ def test_aggregating_on_a_solution_then_a_more_cost_saving_one_appears() -> None
     sb_low_rate = make_test_spendbundle(coins[2], fee=highest_fee // 5)
     saved_cost_on_solution_A = agg_and_add_sb_returning_cost_info(mempool, [sb_A, sb_low_rate])
     invariant_check_mempool(mempool)
-    result = mempool.create_bundle_from_mempool_items(always)
+    result = await mempool.create_bundle_from_mempool_items(
+        always, get_unspent_lineage_info_for_puzzle_hash, test_constants, uint32(0)
+    )
     assert result is not None
     agg, _ = result
     # Make sure both items would be processed
@@ -2970,7 +2977,9 @@ def test_aggregating_on_a_solution_then_a_more_cost_saving_one_appears() -> None
     # If we process everything now, the 3 x ~3 FPC items get skipped because
     # sb_A1 gets picked before them (~10 FPC), so from then on only sb_A2 (~2 FPC)
     # would get picked
-    result = mempool.create_bundle_from_mempool_items(always)
+    result = await mempool.create_bundle_from_mempool_items(
+        always, get_unspent_lineage_info_for_puzzle_hash, test_constants, uint32(0)
+    )
     assert result is not None
     agg, _ = result
     # The 3 items got skipped here
@@ -2982,6 +2991,8 @@ def test_aggregating_on_a_solution_then_a_more_cost_saving_one_appears() -> None
 
 def test_get_puzzle_and_solution_for_coin_failure():
     with pytest.raises(
-        ValueError, match=f"Failed to get puzzle and solution for coin {TEST_COIN}, error: failed to fill whole buffer"
+        ValueError, match=f"Failed to get puzzle and solution for coin {TEST_COIN}, error: \\('coin not found', '80'\\)"
     ):
-        get_puzzle_and_solution_for_coin(BlockGenerator(SerializedProgram(), [], []), TEST_COIN, 0, test_constants)
+        get_puzzle_and_solution_for_coin(
+            BlockGenerator(SerializedProgram.to(None), [], []), TEST_COIN, 0, test_constants
+        )

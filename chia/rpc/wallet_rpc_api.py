@@ -12,13 +12,15 @@ from clvm_tools.binutils import assemble
 
 from chia.consensus.block_rewards import calculate_base_farmer_reward
 from chia.data_layer.data_layer_errors import LauncherCoinNotFoundError
+from chia.data_layer.data_layer_util import dl_verify_proof
 from chia.data_layer.data_layer_wallet import DataLayerWallet
 from chia.pools.pool_wallet import PoolWallet
 from chia.pools.pool_wallet_info import FARMING_TO_POOL, PoolState, PoolWalletInfo, create_pool_state
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
 from chia.protocols.wallet_protocol import CoinState
 from chia.rpc.rpc_server import Endpoint, EndpointResult, default_get_connections
-from chia.rpc.util import tx_endpoint
+from chia.rpc.util import marshal, tx_endpoint
+from chia.rpc.wallet_request_types import GetNotifications, GetNotificationsResponse
 from chia.server.outbound_message import NodeType, make_msg
 from chia.server.ws_connection import WSChiaConnection
 from chia.simulator.simulator_protocol import FarmNewBlockProtocol
@@ -79,6 +81,7 @@ from chia.wallet.notification_store import Notification
 from chia.wallet.outer_puzzles import AssetType
 from chia.wallet.payment import Payment
 from chia.wallet.puzzle_drivers import PuzzleInfo, Solver
+from chia.wallet.puzzles import p2_delegated_conditions
 from chia.wallet.puzzles.clawback.metadata import AutoClaimSettings, ClawbackMetadata
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import puzzle_hash_for_synthetic_public_key
 from chia.wallet.singleton import (
@@ -265,6 +268,7 @@ class WalletRpcApi:
             "/dl_get_mirrors": self.dl_get_mirrors,
             "/dl_new_mirror": self.dl_new_mirror,
             "/dl_delete_mirror": self.dl_delete_mirror,
+            "/dl_verify_proof": self.dl_verify_proof,
             # Verified Credential
             "/vc_mint": self.vc_mint,
             "/vc_get": self.vc_get,
@@ -1012,21 +1016,24 @@ class WalletRpcApi:
         tx_list = []
         # Format for clawback transactions
         for tr in transactions:
+            tx = (await self._convert_tx_puzzle_hash(tr)).to_json_dict_convenience(self.service.config)
+            tx_list.append(tx)
+            if tx["type"] not in CLAWBACK_INCOMING_TRANSACTION_TYPES:
+                continue
+            coin: Coin = tr.additions[0]
+            record: Optional[WalletCoinRecord] = await self.service.wallet_state_manager.coin_store.get_coin_record(
+                coin.name()
+            )
+            if record is None:
+                log.error(f"Cannot find coin record for type {tx['type']} transaction {tx['name']}")
+                continue
             try:
-                tx = (await self._convert_tx_puzzle_hash(tr)).to_json_dict_convenience(self.service.config)
-                tx_list.append(tx)
-                if tx["type"] not in CLAWBACK_INCOMING_TRANSACTION_TYPES:
-                    continue
-                coin: Coin = tr.additions[0]
-                record: Optional[WalletCoinRecord] = await self.service.wallet_state_manager.coin_store.get_coin_record(
-                    coin.name()
-                )
-                assert record is not None, f"Cannot find coin record for type {tx['type']} transaction {tx['name']}"
                 tx["metadata"] = record.parsed_metadata().to_json_dict()
-                tx["metadata"]["coin_id"] = coin.name().hex()
-                tx["metadata"]["spent"] = record.spent
-            except Exception:
-                log.exception(f"Failed to get transaction {tr.name}.")
+            except ValueError as e:
+                log.error(f"Could not parse coin record metadata: {type(e).__name__} {e}")
+                continue
+            tx["metadata"]["coin_id"] = coin.name().hex()
+            tx["metadata"]["spent"] = record.spent
         return {
             "transactions": tx_list,
             "wallet_id": wallet_id,
@@ -1406,34 +1413,22 @@ class WalletRpcApi:
 
         return {"success": True, "index": updated_index}
 
-    async def get_notifications(self, request: Dict[str, Any]) -> EndpointResult:
-        ids: Optional[List[str]] = request.get("ids", None)
-        start: Optional[int] = request.get("start", None)
-        end: Optional[int] = request.get("end", None)
-        if ids is None:
+    @marshal
+    async def get_notifications(self, request: GetNotifications) -> GetNotificationsResponse:
+        if request.ids is None:
             notifications: List[
                 Notification
             ] = await self.service.wallet_state_manager.notification_manager.notification_store.get_all_notifications(
-                pagination=(start, end)
+                pagination=(request.start, request.end)
             )
         else:
             notifications = (
                 await self.service.wallet_state_manager.notification_manager.notification_store.get_notifications(
-                    [bytes32.from_hexstr(id) for id in ids]
+                    request.ids
                 )
             )
 
-        return {
-            "notifications": [
-                {
-                    "id": notification.coin_id.hex(),
-                    "message": notification.message.hex(),
-                    "amount": notification.amount,
-                    "height": notification.height,
-                }
-                for notification in notifications
-            ]
-        }
+        return GetNotificationsResponse(notifications)
 
     async def delete_notifications(self, request: Dict[str, Any]) -> EndpointResult:
         ids: Optional[List[str]] = request.get("ids", None)
@@ -1482,7 +1477,7 @@ class WalletRpcApi:
             except ValueError:
                 raise ValueError(f"Invalid signing mode: {signing_mode_str!r}")
 
-        if signing_mode == SigningMode.CHIP_0002:
+        if signing_mode == SigningMode.CHIP_0002 or signing_mode == SigningMode.CHIP_0002_P2_DELEGATED_CONDITIONS:
             # CHIP-0002 message signatures are made over the tree hash of:
             #   ("Chia Signed Message", message)
             message_to_verify: bytes = Program.to((CHIP_0002_SIGN_MESSAGE_PREFIX, input_message)).get_tree_hash()
@@ -1506,9 +1501,15 @@ class WalletRpcApi:
             # endpoints, the "address" field should contain the p2_address of the NFT/DID
             # that was used to sign the message.
             puzzle_hash: bytes32 = decode_puzzle_hash(request["address"])
-            if puzzle_hash != puzzle_hash_for_synthetic_public_key(
-                G1Element.from_bytes(hexstr_to_bytes(request["pubkey"]))
-            ):
+            expected_puzzle_hash: Optional[bytes32] = None
+            if signing_mode == SigningMode.CHIP_0002_P2_DELEGATED_CONDITIONS:
+                puzzle = p2_delegated_conditions.puzzle_for_pk(Program.to(hexstr_to_bytes(request["pubkey"])))
+                expected_puzzle_hash = bytes32(puzzle.get_tree_hash())
+            else:
+                expected_puzzle_hash = puzzle_hash_for_synthetic_public_key(
+                    G1Element.from_bytes(hexstr_to_bytes(request["pubkey"]))
+                )
+            if puzzle_hash != expected_puzzle_hash:
                 return {"isValid": False, "error": "Public key doesn't match the address"}
         if is_valid:
             return {"isValid": is_valid}
@@ -1834,6 +1835,8 @@ class WalletRpcApi:
                     "requested": requested,
                     "fees": offer.fees(),
                     "infos": infos,
+                    "additions": [c.name().hex() for c in offer.additions()],
+                    "removals": [c.name().hex() for c in offer.removals()],
                     "valid_times": {
                         k: v
                         for k, v in valid_times.to_json_dict().items()
@@ -3046,11 +3049,7 @@ class WalletRpcApi:
         else:
             nfts = await self.service.wallet_state_manager.nft_store.get_nft_list(start_index=start_index, count=count)
         for nft in nfts:
-            nft_info = await nft_puzzles.get_nft_info_from_puzzle(
-                nft,
-                self.service.wallet_state_manager.config,
-                request.get("ignore_size_limit", False),
-            )
+            nft_info = await nft_puzzles.get_nft_info_from_puzzle(nft, self.service.wallet_state_manager.config)
             nft_info_list.append(nft_info)
         return {"wallet_id": wallet_id, "success": True, "nft_list": nft_info_list}
 
@@ -3404,7 +3403,7 @@ class WalletRpcApi:
         full_puzzle = nft_puzzles.create_full_puzzle(
             uncurried_nft.singleton_launcher_id,
             metadata,
-            uncurried_nft.metadata_updater_hash,
+            bytes32(uncurried_nft.metadata_updater_hash.as_atom()),
             inner_puzzle,
         )
 
@@ -3430,7 +3429,6 @@ class WalletRpcApi:
                 uint32(coin_state.created_height) if coin_state.created_height else uint32(0),
             ),
             self.service.wallet_state_manager.config,
-            request.get("ignore_size_limit", False),
         )
         # This is a bit hacky, it should just come out like this, but this works for this RPC
         nft_info = dataclasses.replace(nft_info, p2_address=p2_puzzle_hash)
@@ -4155,6 +4153,19 @@ class WalletRpcApi:
         return {
             "transactions": [tx.to_json_dict_convenience(self.service.config) for tx in txs],
         }
+
+    async def dl_verify_proof(
+        self,
+        request: Dict[str, Any],
+    ) -> EndpointResult:
+        """Verify a proof of inclusion for a DL singleton"""
+        res = await dl_verify_proof(
+            request,
+            peer=self.service.get_full_node_peer(),
+            wallet_node=self.service.wallet_state_manager.wallet_node,
+        )
+
+        return res
 
     ##########################################################################################
     # Verified Credential

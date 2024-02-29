@@ -441,7 +441,7 @@ class Farmer:
             value=ErrorResponse(uint16(PoolErrorCode.REQUEST_FAILED.value), error_message).to_json_dict(),
         )
 
-    def on_disconnect(self, connection: WSChiaConnection) -> None:
+    async def on_disconnect(self, connection: WSChiaConnection) -> None:
         self.log.info(f"peer disconnected {connection.get_peer_logging()}")
         self.state_changed("close_connection", {})
         if connection.connection_type is NodeType.HARVESTER:
@@ -1007,3 +1007,59 @@ class Farmer:
             except Exception as e:
                 tb = traceback.format_exc()
                 self.log.error(f"Exception in update_og_pool_info, {e} {tb}")
+
+    def notify_farmer_reward_taken_by_harvester_as_fee(
+        self, sp: farmer_protocol.NewSignagePoint, proof_of_space: harvester_protocol.NewProofOfSpace
+    ) -> None:
+        """
+        Apply a fee quality convention (see CHIP-22: https://github.com/Chia-Network/chips/pull/88)
+        given the proof and signage point. This will be tested against the fee threshold reported
+        by the harvester (if any), and logged.
+        """
+        assert proof_of_space.farmer_reward_address_override is not None
+
+        challenge_str = str(sp.challenge_hash)
+
+        ph_prefix = self.config["network_overrides"]["config"][self.config["selected_network"]]["address_prefix"]
+        farmer_reward_puzzle_hash = encode_puzzle_hash(proof_of_space.farmer_reward_address_override, ph_prefix)
+
+        self.log.info(
+            f"Farmer reward for challenge '{challenge_str}' "
+            + f"taken by harvester for reward address '{farmer_reward_puzzle_hash}'"
+        )
+
+        fee_quality = calculate_harvester_fee_quality(proof_of_space.proof.proof, sp.challenge_hash)
+        fee_quality_rate = float(fee_quality) / float(0xFFFFFFFF) * 100.0
+
+        if proof_of_space.fee_info is not None:
+            fee_threshold = proof_of_space.fee_info.applied_fee_threshold
+            fee_threshold_rate = float(fee_threshold) / float(0xFFFFFFFF) * 100.0
+
+            if fee_quality <= fee_threshold:
+                self.log.info(
+                    f"Fee threshold passed for challenge '{challenge_str}': "
+                    + f"{fee_quality_rate:.3f}%/{fee_threshold_rate:.3f}% ({fee_quality}/{fee_threshold})"
+                )
+            else:
+                self.log.warning(
+                    f"Invalid fee threshold for challenge '{challenge_str}': "
+                    + f"{fee_quality_rate:.3f}%/{fee_threshold_rate:.3f}% ({fee_quality}/{fee_threshold})"
+                )
+                self.log.warning(
+                    "Harvester illegitimately took a fee reward that "
+                    + "did not belong to it or it incorrectly applied the fee convention."
+                )
+        else:
+            self.log.warning(
+                "Harvester illegitimately took reward by failing to provide its fee rate "
+                + f"for challenge '{challenge_str}'. "
+                + f"Fee quality was {fee_quality_rate:.3f}% ({fee_quality} or 0x{fee_quality:08x})"
+            )
+
+
+def calculate_harvester_fee_quality(proof: bytes, challenge: bytes32) -> uint32:
+    """
+    This calculates the 'fee quality' given a convention between farmers and third party harvesters.
+    See CHIP-22: https://github.com/Chia-Network/chips/pull/88
+    """
+    return uint32(int.from_bytes(std_hash(proof + challenge)[32 - 4 :], byteorder="big", signed=False))

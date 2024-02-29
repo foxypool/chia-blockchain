@@ -18,7 +18,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import anyio
 from chia_rs import ALLOW_BACKREFS, MEMPOOL_MODE, AugSchemeMPL, G1Element, G2Element, PrivateKey, solution_generator
-from clvm.casts import int_from_bytes
 
 from chia.consensus.block_creation import create_unfinished_block, unfinished_block_to_full_block
 from chia.consensus.block_record import BlockRecord
@@ -169,8 +168,8 @@ def compute_additions_unchecked(sb: SpendBundle) -> List[Coin]:
             op = next(atoms).atom
             if op != ConditionOpcode.CREATE_COIN.value:
                 continue
-            puzzle_hash = next(atoms).atom
-            amount = int_from_bytes(next(atoms).atom)
+            puzzle_hash = next(atoms).as_atom()
+            amount = next(atoms).as_int()
             ret.append(Coin(parent_id, puzzle_hash, amount))
     return ret
 
@@ -982,8 +981,8 @@ class BlockTools:
                 pending_ses = True
                 ses_hash: Optional[bytes32] = sub_epoch_summary.get_hash()
                 # if the last block is the last block of the epoch, we set the new sub-slot iters and difficulty
-                new_sub_slot_iters: Optional[uint64] = sub_epoch_summary.new_sub_slot_iters
-                new_difficulty: Optional[uint64] = sub_epoch_summary.new_difficulty
+                new_sub_slot_iters: Optional[uint64] = uint64.construct_optional(sub_epoch_summary.new_sub_slot_iters)
+                new_difficulty: Optional[uint64] = uint64.construct_optional(sub_epoch_summary.new_difficulty)
 
                 self.log.info(f"Sub epoch summary: {sub_epoch_summary} for block {latest_block.height+1}")
             else:  # the previous block is not the last block of the sub-epoch or epoch
@@ -1253,8 +1252,8 @@ class BlockTools:
                 num_empty_slots_added += 1
 
             if new_sub_slot_iters is not None and new_difficulty is not None:  # new epoch
-                sub_slot_iters = new_sub_slot_iters
-                difficulty = new_difficulty
+                sub_slot_iters = uint64(new_sub_slot_iters)
+                difficulty = uint64(new_difficulty)
 
     def create_genesis_block(
         self,
@@ -1351,7 +1350,7 @@ class BlockTools:
                             cc_challenge,
                             ip_iters,
                         )
-                        cc_ip_vdf = replace(cc_ip_vdf, number_of_iterations=ip_iters)
+                        cc_ip_vdf = cc_ip_vdf.replace(number_of_iterations=ip_iters)
                         rc_ip_vdf, rc_ip_proof = get_vdf_info_and_proof(
                             constants,
                             ClassgroupElement.get_default_element(),
@@ -1422,7 +1421,7 @@ class BlockTools:
                         + calculate_sp_iters(
                             self.constants,
                             self.constants.SUB_SLOT_ITERS_STARTING,
-                            unfinished_block.reward_chain_block.signage_point_index,
+                            uint8(unfinished_block.reward_chain_block.signage_point_index),
                         )
                     )
                     return unfinished_block_to_full_block(
@@ -1553,7 +1552,7 @@ def get_signage_point(
         rc_vdf_challenge,
         rc_vdf_iters,
     )
-    cc_sp_vdf = replace(cc_sp_vdf, number_of_iterations=sp_iters)
+    cc_sp_vdf = cc_sp_vdf.replace(number_of_iterations=sp_iters)
     if normalized_to_identity_cc_sp:
         _, cc_sp_proof = get_vdf_info_and_proof(
             constants,
@@ -1598,7 +1597,7 @@ def finish_block(
         cc_vdf_challenge,
         new_ip_iters,
     )
-    cc_ip_vdf = replace(cc_ip_vdf, number_of_iterations=ip_iters)
+    cc_ip_vdf = cc_ip_vdf.replace(number_of_iterations=ip_iters)
     if normalized_to_identity_cc_ip:
         _, cc_ip_proof = get_vdf_info_and_proof(
             constants,
@@ -1751,7 +1750,7 @@ def get_icc(
     if len(finished_sub_slots) == 0:
         prev_deficit = latest_block.deficit
     else:
-        prev_deficit = finished_sub_slots[-1].reward_chain.deficit
+        prev_deficit = uint8(finished_sub_slots[-1].reward_chain.deficit)
 
     if deficit == prev_deficit == constants.MIN_BLOCKS_PER_CHALLENGE_BLOCK:
         # new slot / overflow sb to new slot / overflow sb
@@ -1986,7 +1985,7 @@ def compute_cost_test(generator: BlockGenerator, constants: ConsensusConstants, 
             condition_cost += conditions_cost(result, height >= constants.HARD_FORK_HEIGHT)
 
     else:
-        block_program_args = Program.to([[bytes(g) for g in generator.generator_refs]])
+        block_program_args = SerializedProgram.to([[bytes(g) for g in generator.generator_refs]])
         clvm_cost, result = GENERATOR_MOD._run(INFINITE_COST, MEMPOOL_MODE, [generator.program, block_program_args])
 
         for res in result.first().as_iter():
@@ -2024,13 +2023,20 @@ async def create_block_tools_async(
     root_path: Optional[Path] = None,
     keychain: Optional[Keychain] = None,
     config_overrides: Optional[Dict[str, Any]] = None,
+    num_og_plots: int = 15,
+    num_pool_plots: int = 5,
+    num_non_keychain_plots: int = 3,
 ) -> BlockTools:
     global create_block_tools_async_count
     create_block_tools_async_count += 1
     print(f"  create_block_tools_async called {create_block_tools_async_count} times")
     bt = BlockTools(constants, root_path, keychain, config_overrides=config_overrides)
     await bt.setup_keys()
-    await bt.setup_plots()
+    await bt.setup_plots(
+        num_og_plots=num_og_plots,
+        num_pool_plots=num_pool_plots,
+        num_non_keychain_plots=num_non_keychain_plots,
+    )
 
     return bt
 
@@ -2051,8 +2057,10 @@ def create_block_tools(
     return bt
 
 
-def make_unfinished_block(block: FullBlock, constants: ConsensusConstants) -> UnfinishedBlock:
-    if is_overflow_block(constants, block.reward_chain_block.signage_point_index):
+def make_unfinished_block(
+    block: FullBlock, constants: ConsensusConstants, *, force_overflow: bool = False
+) -> UnfinishedBlock:
+    if force_overflow or is_overflow_block(constants, uint8(block.reward_chain_block.signage_point_index)):
         finished_ss = block.finished_sub_slots[:-1]
     else:
         finished_ss = block.finished_sub_slots

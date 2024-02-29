@@ -13,16 +13,13 @@ from pytest_mock import MockerFixture
 
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.farmer.farmer import Farmer, increment_pool_stats, strip_old_entries
-from chia.farmer.farmer_api import FarmerAPI
-from chia.harvester.harvester import Harvester
-from chia.harvester.harvester_api import HarvesterAPI
 from chia.pools.pool_config import PoolWalletConfig
 from chia.protocols import farmer_protocol, harvester_protocol
 from chia.protocols.harvester_protocol import NewProofOfSpace, RespondSignatures
 from chia.protocols.pool_protocol import PoolErrorCode
-from chia.server.start_service import Service
 from chia.server.ws_connection import WSChiaConnection
 from chia.simulator.block_tools import BlockTools
+from chia.types.aliases import FarmerService, HarvesterService
 from chia.types.blockchain_format.proof_of_space import (
     ProofOfSpace,
     generate_plot_public_key,
@@ -115,6 +112,8 @@ class DummyHarvesterPeer:
             local_pk=local_sk.get_g1(),
             farmer_pk=farmer_public_key,
             message_signatures=[(message, signature)],
+            include_source_signature_data=False,
+            farmer_reward_address_override=None,
         )
 
 
@@ -579,6 +578,9 @@ async def test_farmer_new_proof_of_space_for_pool_stats(
         plot_identifier=case.plot_identifier,
         proof=pos,
         signage_point_index=case.signage_point_index,
+        include_source_signature_data=False,
+        farmer_reward_address_override=None,
+        fee_info=None,
     )
 
     p2_singleton_puzzle_hash = case.pool_contract_puzzle_hash
@@ -716,6 +718,9 @@ def create_valid_pos(farmer: Farmer) -> Tuple[farmer_protocol.NewSignagePoint, P
         plot_identifier=case.plot_identifier,
         proof=pos,
         signage_point_index=case.signage_point_index,
+        include_source_signature_data=False,
+        farmer_reward_address_override=None,
+        fee_info=None,
     )
     p2_singleton_puzzle_hash = case.pool_contract_puzzle_hash
     farmer.constants = dataclasses.replace(DEFAULT_CONSTANTS, POOL_SUB_SLOT_ITERS=case.sub_slot_iters)
@@ -853,7 +858,7 @@ class PoolStateCase:
 @pytest.mark.anyio
 async def test_farmer_pool_response(
     mocker: MockerFixture,
-    farmer_one_harvester: Tuple[List[Service[Harvester, HarvesterAPI]], Service[Farmer, FarmerAPI], BlockTools],
+    farmer_one_harvester: Tuple[List[HarvesterService], FarmerService, BlockTools],
     case: PoolStateCase,
 ) -> None:
     _, farmer_service, _ = farmer_one_harvester
