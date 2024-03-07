@@ -865,11 +865,21 @@ class FarmerAPI:
 
         # The plot key is 2/2 so we need the harvester's half of the signature
         m_to_sign = payload.get_hash()
+        m_src_data: Optional[List[Optional[SignatureRequestSourceData]]] = None
+
+        if (  # pragma: no cover
+                new_proof_of_space.include_source_signature_data
+                or new_proof_of_space.farmer_reward_address_override is not None
+        ):
+            m_src_data = [SignatureRequestSourceData(uint8(SigningDataKind.PARTIAL), bytes(payload))]
+
         request = harvester_protocol.RequestSignatures(
             new_proof_of_space.plot_identifier,
             new_proof_of_space.challenge_hash,
             new_proof_of_space.sp_hash,
             [m_to_sign],
+            message_data=m_src_data,
+            rc_block_unfinished=None,
         )
         response: Any = await peer.call_api(HarvesterAPI.request_signatures, request)
         if not isinstance(response, harvester_protocol.RespondSignatures):
