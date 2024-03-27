@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
-from chia_rs import AugSchemeMPL, G2Element, G1Element, PrivateKey
+from chia_rs import AugSchemeMPL, G2Element, PrivateKey
 
 from chia import __version__
 from chia.consensus.pot_iterations import calculate_iterations_quality, calculate_sp_interval_iters
 from chia.farmer.farmer import Farmer, increment_pool_stats, strip_old_entries
-from chia.farmer.pooling.og_pool_protocol import PartialPayload, SubmitPartial
 from chia.harvester.harvester_api import HarvesterAPI
 from chia.protocols import farmer_protocol, harvester_protocol
 from chia.protocols.farmer_protocol import DeclareProofOfSpace, SignedValues
@@ -473,8 +471,8 @@ class FarmerAPI:
                 return
 
             pool_public_key = new_proof_of_space.proof.pool_public_key
-            if pool_public_key is not None and self.farmer.is_pooling_enabled():
-                await self.process_new_proof_of_space_for_og_pool(
+            if pool_public_key is not None and self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
+                await self.farmer.og_pooling_manager.process_new_proof_of_space_for_og_pool(
                     new_proof_of_space,
                     peer,
                     pool_public_key,
@@ -535,9 +533,9 @@ class FarmerAPI:
                 )
             difficulty = new_signage_point.difficulty
             sub_slot_iters = new_signage_point.sub_slot_iters
-            if self.farmer.is_pooling_enabled():
+            if self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
                 sub_slot_iters = self.farmer.constants.POOL_SUB_SLOT_ITERS
-                difficulty = self.farmer.og_pool_state.difficulty
+                difficulty = self.farmer.og_pooling_manager.current_difficulty
 
             message = harvester_protocol.NewSignagePointHarvester(
                 new_signage_point.challenge_hash,
@@ -750,7 +748,7 @@ class FarmerAPI:
                             )
                             return None
 
-                        pool_target: Optional[PoolTarget] = PoolTarget(self.farmer.pool_target, uint32(0))
+                        pool_target: Optional[PoolTarget] = PoolTarget(self.farmer.pool_target_puzzle_hash, uint32(0))
                         assert pool_target is not None
                         pool_target_signature: Optional[G2Element] = AugSchemeMPL.sign(
                             self.farmer.pool_sks_map[pool_pk], bytes(pool_target)
@@ -828,105 +826,3 @@ class FarmerAPI:
                     )
 
         return None
-
-    async def process_new_proof_of_space_for_og_pool(
-            self,
-            new_proof_of_space: harvester_protocol.NewProofOfSpace,
-            peer: WSChiaConnection,
-            pool_public_key: G1Element,
-            computed_quality_string: bytes32
-    ):
-        og_pool_state = self.farmer.og_pool_state
-
-        # Otherwise, send the proof of space to the pool
-        # When we win a block, we also send the partial to the pool
-        required_iters = calculate_iterations_quality(
-            self.farmer.constants.DIFFICULTY_CONSTANT_FACTOR,
-            computed_quality_string,
-            new_proof_of_space.proof.size,
-            og_pool_state.difficulty,
-            new_proof_of_space.sp_hash,
-        )
-        if required_iters >= self.farmer.iters_limit:
-            self.farmer.log.debug(
-                f"Proof of space not good enough for OG pool difficulty of {og_pool_state.difficulty}"
-            )
-            return
-
-        # Submit partial to pool
-        is_eos = new_proof_of_space.signage_point_index == 0
-        payload = PartialPayload(
-            new_proof_of_space.proof,
-            new_proof_of_space.sp_hash,
-            is_eos,
-            self.farmer.pool_payout_address,
-            peer.peer_node_id,
-        )
-
-        # The plot key is 2/2 so we need the harvester's half of the signature
-        m_to_sign = payload.get_hash()
-        m_src_data: Optional[List[Optional[SignatureRequestSourceData]]] = None
-
-        if (  # pragma: no cover
-                new_proof_of_space.include_source_signature_data
-                or new_proof_of_space.farmer_reward_address_override is not None
-        ):
-            m_src_data = [SignatureRequestSourceData(uint8(SigningDataKind.PARTIAL), bytes(payload))]
-
-        request = harvester_protocol.RequestSignatures(
-            new_proof_of_space.plot_identifier,
-            new_proof_of_space.challenge_hash,
-            new_proof_of_space.sp_hash,
-            [m_to_sign],
-            message_data=m_src_data,
-            rc_block_unfinished=None,
-        )
-        response: Any = await peer.call_api(HarvesterAPI.request_signatures, request)
-        if not isinstance(response, harvester_protocol.RespondSignatures):
-            self.farmer.log.error(f"Invalid response from harvester: {response}")
-            return
-
-        assert len(response.message_signatures) == 1
-
-        plot_signature: Optional[G2Element] = None
-        for sk in self.farmer.get_private_keys():
-            pk = sk.get_g1()
-            if pk == response.farmer_pk:
-                agg_pk = generate_plot_public_key(response.local_pk, pk)
-                assert agg_pk == new_proof_of_space.proof.plot_public_key
-                sig_farmer = AugSchemeMPL.sign(sk, m_to_sign, agg_pk)
-                plot_signature = AugSchemeMPL.aggregate([sig_farmer, response.message_signatures[0][1]])
-                assert AugSchemeMPL.verify(agg_pk, m_to_sign, plot_signature)
-        pool_sk = self.farmer.pool_sks_map[bytes(pool_public_key)]
-        authentication_signature = AugSchemeMPL.sign(pool_sk, m_to_sign)
-
-        assert plot_signature is not None
-        agg_sig: G2Element = AugSchemeMPL.aggregate([plot_signature, authentication_signature])
-
-        submit_partial = SubmitPartial(payload, agg_sig, og_pool_state.difficulty)
-        self.farmer.log.debug("Submitting partial to OG pool ..")
-        og_pool_state.last_partial_submit_timestamp = time.time()
-        submit_partial_response: Dict
-        try:
-            submit_partial_response = await self.farmer.pool_api_client.submit_partial(submit_partial)
-        except asyncio.TimeoutError:
-            self.farmer.log.error(f"Timed out while submitting partial to OG pool")
-            return
-        except Exception as e:
-            self.farmer.log.error(f"Error submitting partial to OG pool: {e}")
-            return
-        self.farmer.log.debug(f"OG pool response: {submit_partial_response}")
-        if "error_code" in submit_partial_response:
-            if submit_partial_response["error_code"] == 5:
-                self.farmer.log.info(
-                    "Local OG pool difficulty too low, adjusting to OG pool difficulty "
-                    f"({submit_partial_response['current_difficulty']})"
-                )
-                og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])
-            else:
-                self.farmer.log.error(
-                    f"Error in OG pooling: {submit_partial_response['error_code'], submit_partial_response['error_message']}"
-                )
-        else:
-            self.farmer.log.info("The partial submitted to the OG pool was accepted")
-            og_pool_state.difficulty = uint64(submit_partial_response["current_difficulty"])

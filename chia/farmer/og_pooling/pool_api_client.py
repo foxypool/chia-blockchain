@@ -1,9 +1,11 @@
-from typing import Dict, Any
+from __future__ import annotations
+
+from typing import Any, Dict
 
 from aiohttp import ClientSession, ClientTimeout
 
 from chia import __version__
-from chia.farmer.pooling.og_pool_protocol import SubmitPartial
+from chia.farmer.og_pooling.og_pool_protocol import SubmitPartial
 from chia.server.server import ssl_context_for_root
 from chia.ssl.create_ssl import get_mozilla_ca_crt
 
