@@ -440,7 +440,7 @@ class MempoolManager:
             removal_names.add(coin_id)
             spend_additions = []
             for puzzle_hash, amount, _ in spend.create_coin:
-                child_coin = Coin(coin_id, puzzle_hash, amount)
+                child_coin = Coin(coin_id, puzzle_hash, uint64(amount))
                 spend_additions.append(child_coin)
                 additions_dict[child_coin.name()] = child_coin
                 addition_amount = addition_amount + child_coin.amount
@@ -706,7 +706,7 @@ class MempoolManager:
         else:
             log.warning(
                 "updating the mempool using the slow-path. "
-                f"peak: {self.peak.header_hash} "
+                f"peak: {self.peak.header_hash.hex()} "
                 f"new-peak-prev: {new_peak.prev_transaction_block_hash} "
                 f"coins: {'not set' if spent_coins is None else 'set'}"
             )
