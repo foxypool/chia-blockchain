@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, cast
 
 import anyio
-from chia_rs import AugSchemeMPL, G1Element, G2Element
+from chia_rs import AugSchemeMPL, G1Element, G2Element, MerkleSet
 from chiabip158 import PyBIP158
 
 from chia.consensus.block_creation import create_unfinished_block
@@ -31,6 +31,7 @@ from chia.full_node.tx_processing_queue import TransactionQueueFull
 from chia.protocols import farmer_protocol, full_node_protocol, introducer_protocol, timelord_protocol, wallet_protocol
 from chia.protocols.full_node_protocol import RejectBlock, RejectBlocks
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
+from chia.protocols.shared_protocol import Capability
 from chia.protocols.wallet_protocol import (
     CoinState,
     PuzzleSolutionResponse,
@@ -61,12 +62,13 @@ from chia.types.spend_bundle import SpendBundle
 from chia.types.transaction_queue_entry import TransactionQueueEntry
 from chia.types.unfinished_block import UnfinishedBlock
 from chia.util.api_decorators import api_request
+from chia.util.db_wrapper import SQLITE_MAX_VARIABLE_NUMBER
 from chia.util.full_block_utils import header_block_from_block
 from chia.util.generator_tools import get_block_header, tx_removals_and_additions
 from chia.util.hash import std_hash
 from chia.util.ints import uint8, uint32, uint64, uint128
 from chia.util.limited_semaphore import LimitedSemaphoreFullError
-from chia.util.merkle_set import MerkleSet
+from chia.util.misc import to_batches
 
 if TYPE_CHECKING:
     from chia.full_node.full_node import FullNode
@@ -1257,11 +1259,13 @@ class FullNodeAPI:
             response = wallet_protocol.RespondAdditions(request.height, header_hash, coins_map, None)
         else:
             # Create addition Merkle set
-            addition_merkle_set = MerkleSet()
             # Addition Merkle set contains puzzlehash and hash of all coins with that puzzlehash
+            leafs: List[bytes32] = []
             for puzzle, coins in puzzlehash_coins_map.items():
-                addition_merkle_set.add_already_hashed(puzzle)
-                addition_merkle_set.add_already_hashed(hash_coin_ids([c.name() for c in coins]))
+                leafs.append(puzzle)
+                leafs.append(hash_coin_ids([c.name() for c in coins]))
+
+            addition_merkle_set = MerkleSet(leafs)
 
             for puzzle_hash in request.puzzle_hashes:
                 # This is a proof of inclusion if it's in (result==True), or exclusion of it's not in
@@ -1327,9 +1331,10 @@ class FullNodeAPI:
             response = wallet_protocol.RespondRemovals(block.height, block.header_hash, coins_map, None)
         else:
             assert block.transactions_generator
-            removal_merkle_set = MerkleSet()
+            leafs: List[bytes32] = []
             for removed_name, removed_coin in all_removals_dict.items():
-                removal_merkle_set.add_already_hashed(removed_name)
+                leafs.append(removed_name)
+            removal_merkle_set = MerkleSet(leafs)
             assert removal_merkle_set.get_root() == block.foliage_transaction_block.removals_root
             for coin_name in request.coin_names:
                 result, proof = removal_merkle_set.is_included_already_hashed(coin_name)
@@ -1825,6 +1830,7 @@ class FullNodeAPI:
 
         if is_done and request.subscribe_when_finished:
             subs.add_puzzle_subscriptions(peer.peer_node_id, puzzle_hashes, max_subscriptions)
+            await self.mempool_updates_for_puzzle_hashes(peer, set(puzzle_hashes), request.filters.include_hinted)
 
         response = wallet_protocol.RespondPuzzleState(puzzle_hashes, height, header_hash, is_done, coin_states)
         msg = make_msg(ProtocolMessageTypes.respond_puzzle_state, response)
@@ -1882,10 +1888,83 @@ class FullNodeAPI:
 
         if request.subscribe:
             subs.add_coin_subscriptions(peer.peer_node_id, coin_ids, max_subscriptions)
+            await self.mempool_updates_for_coin_ids(peer, set(coin_ids))
 
         response = wallet_protocol.RespondCoinState(coin_ids, coin_states)
         msg = make_msg(ProtocolMessageTypes.respond_coin_state, response)
         return msg
+
+    @api_request(reply_types=[ProtocolMessageTypes.respond_cost_info])
+    async def request_cost_info(self, _request: wallet_protocol.RequestCostInfo) -> Optional[Message]:
+        mempool_manager = self.full_node.mempool_manager
+        response = wallet_protocol.RespondCostInfo(
+            max_transaction_cost=mempool_manager.max_tx_clvm_cost,
+            max_block_cost=mempool_manager.max_block_clvm_cost,
+            max_mempool_cost=uint64(mempool_manager.mempool_max_total_cost),
+            mempool_cost=uint64(mempool_manager.mempool._total_cost),
+            mempool_fee=uint64(mempool_manager.mempool._total_fee),
+            bump_fee_per_cost=uint8(mempool_manager.nonzero_fee_minimum_fpc),
+        )
+        msg = make_msg(ProtocolMessageTypes.respond_cost_info, response)
+        return msg
+
+    async def mempool_updates_for_puzzle_hashes(
+        self, peer: WSChiaConnection, puzzle_hashes: Set[bytes32], include_hints: bool
+    ) -> None:
+        if Capability.MEMPOOL_UPDATES not in peer.peer_capabilities:
+            return
+
+        start_time = time.monotonic()
+
+        async with self.full_node.db_wrapper.reader() as conn:
+            transaction_ids = set(
+                self.full_node.mempool_manager.mempool.items_with_puzzle_hashes(puzzle_hashes, include_hints)
+            )
+
+            hinted_coin_ids: Set[bytes32] = set()
+
+            for batch in to_batches(puzzle_hashes, SQLITE_MAX_VARIABLE_NUMBER):
+                hints_db: Tuple[bytes, ...] = tuple(batch.entries)
+                cursor = await conn.execute(
+                    f"SELECT coin_id from hints INDEXED BY hint_index "
+                    f'WHERE hint IN ({"?," * (len(batch.entries) - 1)}?)',
+                    hints_db,
+                )
+                for row in await cursor.fetchall():
+                    hinted_coin_ids.add(bytes32(row[0]))
+                await cursor.close()
+
+            transaction_ids |= set(self.full_node.mempool_manager.mempool.items_with_coin_ids(hinted_coin_ids))
+
+        if len(transaction_ids) > 0:
+            message = wallet_protocol.MempoolItemsAdded(list(transaction_ids))
+            await peer.send_message(make_msg(ProtocolMessageTypes.mempool_items_added, message))
+
+        total_time = time.monotonic() - start_time
+
+        self.log.log(
+            logging.DEBUG if total_time < 2.0 else logging.WARNING,
+            f"Sending initial mempool items to peer {peer.peer_node_id} took {total_time:.4f}s",
+        )
+
+    async def mempool_updates_for_coin_ids(self, peer: WSChiaConnection, coin_ids: Set[bytes32]) -> None:
+        if Capability.MEMPOOL_UPDATES not in peer.peer_capabilities:
+            return
+
+        start_time = time.monotonic()
+
+        transaction_ids = self.full_node.mempool_manager.mempool.items_with_coin_ids(coin_ids)
+
+        if len(transaction_ids) > 0:
+            message = wallet_protocol.MempoolItemsAdded(list(transaction_ids))
+            await peer.send_message(make_msg(ProtocolMessageTypes.mempool_items_added, message))
+
+        total_time = time.monotonic() - start_time
+
+        self.log.log(
+            logging.DEBUG if total_time < 2.0 else logging.WARNING,
+            f"Sending initial mempool items to peer {peer.peer_node_id} took {total_time:.4f}s",
+        )
 
     def max_subscriptions(self, peer: WSChiaConnection) -> int:
         if self.is_trusted(peer):
