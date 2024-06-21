@@ -52,6 +52,9 @@ jobs:
           - runs-on: macos-11
             name: intel
             bladebit-suffix: macos-x86-64.tar.gz
+          - runs-on: macos-14
+            name: m1
+            bladebit-suffix: macos-arm64.tar.gz
 
     steps:
       - uses: Chia-Network/actions/clean-workspace@main
@@ -379,10 +382,6 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - name: 11
-            matrix: 11
-            runs-on:
-              intel: macos-11
           - name: 12
             matrix: 12
             runs-on:
