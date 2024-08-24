@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "chia-blockchain"
 # see [tool.poetry-dynamic-versioning]
-version = "0.0.0"
+version = "2.4.3+og-1.6.1"
 description = "Chia blockchain full node, farmer, timelord, and wallet."
 authors = ["Mariano Sorgente <mariano@chia.net>"]
 license = "Apache License"
@@ -116,7 +116,7 @@ upnp = ["miniupnpc"]
 legacy_keyring = ["keyrings.cryptfile"]
 
 [tool.poetry-dynamic-versioning]
-enable = true
+enable = false
 vcs = "git"
 pattern = "default-unprefixed"
 format-jinja = """
