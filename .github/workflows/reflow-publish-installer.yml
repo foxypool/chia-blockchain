@@ -113,14 +113,6 @@ jobs:
           aws s3 cp "artifacts/${FILE}" "${DEV_S3_URL}/${DEV_FILE}"
           aws s3 cp "artifacts/${FILE}.sha256" "${LATEST_DEV_S3_URL}/${DEV_FILE}.sha256"
 
-      - name: Create torrent
-        if: env.RELEASE == 'true' && matrix.mode.matrix == 'gui'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          py3createtorrent -f -t ${TRACKER_URL} artifacts/${FILE} -o artifacts/${FILE}.torrent --webseed https://download.chia.net/install/${FILE}
-          gh release upload --repo ${{ github.repository }} $RELEASE_TAG artifacts/${FILE}.torrent
-
       - name: Upload Dev Installer
         if: steps.check_secrets.outputs.HAS_AWS_SECRET && github.ref == 'refs/heads/main'
         run: |
