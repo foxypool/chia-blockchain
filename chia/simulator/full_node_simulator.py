@@ -10,7 +10,7 @@ import anyio
 from chia.consensus.block_record import BlockRecord
 from chia.consensus.block_rewards import calculate_base_farmer_reward, calculate_pool_reward
 from chia.consensus.blockchain import BlockchainMutexPriority
-from chia.consensus.multiprocess_validation import PreValidationResult
+from chia.consensus.multiprocess_validation import PreValidationResult, pre_validate_blocks_multiprocessing
 from chia.full_node.full_node import FullNode
 from chia.full_node.full_node_api import FullNodeAPI
 from chia.rpc.rpc_server import default_get_connections
@@ -163,18 +163,31 @@ class FullNodeSimulator(FullNodeAPI):
     async def farm_new_transaction_block(
         self, request: FarmNewBlockProtocol, force_wait_for_timestamp: bool = False
     ) -> FullBlock:
+        ssi = self.full_node.constants.SUB_SLOT_ITERS_STARTING
+        diff = self.full_node.constants.DIFFICULTY_STARTING
         async with self.full_node.blockchain.priority_mutex.acquire(priority=BlockchainMutexPriority.high):
             self.log.info("Farming new block!")
             current_blocks = await self.get_all_full_blocks()
             if len(current_blocks) == 0:
                 genesis = self.bt.get_consecutive_blocks(uint8(1))[0]
-                pre_validation_results: List[PreValidationResult] = (
-                    await self.full_node.blockchain.pre_validate_blocks_multiprocessing(
-                        [genesis], {}, validate_signatures=True
-                    )
+                pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+                    self.full_node.blockchain.constants,
+                    self.full_node.blockchain,
+                    [genesis],
+                    self.full_node.blockchain.pool,
+                    {},
+                    sub_slot_iters=ssi,
+                    difficulty=diff,
+                    prev_ses_block=None,
+                    validate_signatures=True,
                 )
                 assert pre_validation_results is not None
-                await self.full_node.blockchain.add_block(genesis, pre_validation_results[0], self.full_node._bls_cache)
+                await self.full_node.blockchain.add_block(
+                    genesis,
+                    pre_validation_results[0],
+                    self.full_node._bls_cache,
+                    self.full_node.constants.SUB_SLOT_ITERS_STARTING,
+                )
 
             peak = self.full_node.blockchain.get_peak()
             assert peak is not None
@@ -213,19 +226,31 @@ class FullNodeSimulator(FullNodeAPI):
         return more[-1]
 
     async def farm_new_block(self, request: FarmNewBlockProtocol, force_wait_for_timestamp: bool = False):
+        ssi = self.full_node.constants.SUB_SLOT_ITERS_STARTING
+        diffculty = self.full_node.constants.DIFFICULTY_STARTING
         async with self.full_node.blockchain.priority_mutex.acquire(priority=BlockchainMutexPriority.high):
             self.log.info("Farming new block!")
             current_blocks = await self.get_all_full_blocks()
             if len(current_blocks) == 0:
                 genesis = self.bt.get_consecutive_blocks(uint8(1))[0]
-                pre_validation_results: List[PreValidationResult] = (
-                    await self.full_node.blockchain.pre_validate_blocks_multiprocessing(
-                        [genesis], {}, validate_signatures=True
-                    )
+                pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+                    self.full_node.blockchain.constants,
+                    self.full_node.blockchain,
+                    [genesis],
+                    self.full_node.blockchain.pool,
+                    {},
+                    sub_slot_iters=ssi,
+                    difficulty=diffculty,
+                    prev_ses_block=None,
+                    validate_signatures=True,
                 )
                 assert pre_validation_results is not None
-                await self.full_node.blockchain.add_block(genesis, pre_validation_results[0], self.full_node._bls_cache)
-
+                await self.full_node.blockchain.add_block(
+                    genesis,
+                    pre_validation_results[0],
+                    self.full_node._bls_cache,
+                    ssi,
+                )
             peak = self.full_node.blockchain.get_peak()
             assert peak is not None
             curr: BlockRecord = peak
@@ -670,9 +695,13 @@ class FullNodeSimulator(FullNodeAPI):
                 return set()
 
             outputs: List[Payment] = []
+            amounts_seen: Set[uint64] = set()
             for amount in amounts:
-                puzzle_hash = await wallet.get_new_puzzlehash()
+                # We need unique puzzle hash amount combos so we'll only generate a new puzzle hash when we've already
+                # seen that amount sent to that puzzle hash
+                puzzle_hash = await wallet.get_puzzle_hash(new=amount in amounts_seen)
                 outputs.append(Payment(puzzle_hash, amount))
+                amounts_seen.add(amount)
 
             transaction_records: List[TransactionRecord] = []
             outputs_iterator = iter(outputs)
@@ -682,11 +711,12 @@ class FullNodeSimulator(FullNodeAPI):
                 outputs_group = [output for _, output in zip(range(per_transaction_record_group), outputs_iterator)]
 
                 if len(outputs_group) > 0:
-                    async with wallet.wallet_state_manager.new_action_scope(push=True) as action_scope:
+                    async with wallet.wallet_state_manager.new_action_scope(
+                        DEFAULT_TX_CONFIG, push=True
+                    ) as action_scope:
                         await wallet.generate_signed_transaction(
                             amount=outputs_group[0].amount,
                             puzzle_hash=outputs_group[0].puzzle_hash,
-                            tx_config=DEFAULT_TX_CONFIG,
                             action_scope=action_scope,
                             primaries=outputs_group[1:],
                         )
@@ -694,7 +724,8 @@ class FullNodeSimulator(FullNodeAPI):
                 else:
                     break
 
-            await self.process_transaction_records(records=transaction_records, timeout=None)
+            await self.wait_transaction_records_entered_mempool(transaction_records, timeout=None)
+            await self.farm_blocks_to_puzzlehash(count=1, guarantee_transaction_blocks=True)
 
             output_coins = {coin for transaction_record in transaction_records for coin in transaction_record.additions}
             puzzle_hashes = {output.puzzle_hash for output in outputs}
@@ -720,11 +751,12 @@ class FullNodeSimulator(FullNodeAPI):
             return False  # pragma: no cover
         if not await wallet_node.wallet_state_manager.synced():
             return False
+        all_states_retried = await wallet_node.wallet_state_manager.retry_store.get_all_states_to_retry() == []
         wallet_height = await wallet_node.wallet_state_manager.blockchain.get_finished_sync_up_to()
         if peak_height is not None:
-            return wallet_height >= peak_height
+            return wallet_height >= peak_height and all_states_retried
         full_node_height = self.full_node.blockchain.get_peak_height()
-        return wallet_height == full_node_height
+        return wallet_height == full_node_height and all_states_retried
 
     async def wait_for_wallet_synced(
         self,

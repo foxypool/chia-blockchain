@@ -28,7 +28,8 @@ from chia.consensus.blockchain import AddBlockResult, Blockchain
 from chia.consensus.coinbase import create_farmer_coin
 from chia.consensus.constants import ConsensusConstants
 from chia.consensus.full_block_to_block_record import block_to_block_record
-from chia.consensus.multiprocess_validation import PreValidationResult
+from chia.consensus.get_block_generator import get_block_generator
+from chia.consensus.multiprocess_validation import PreValidationResult, pre_validate_blocks_multiprocessing
 from chia.consensus.pot_iterations import is_overflow_block
 from chia.full_node.mempool_check_conditions import get_name_puzzle_conditions
 from chia.simulator.block_tools import BlockTools, create_block_tools_async
@@ -307,8 +308,11 @@ class TestBlockHeaderValidation:
             [],
         )
         npc_result = None
-        if unf.transactions_generator is not None:
-            block_generator = await blockchain.get_block_generator(unf)
+        # if this assert fires, remove it along with the pragma for the block
+        # below
+        assert unf.transactions_generator is None
+        if unf.transactions_generator is not None:  # pragma: no cover
+            block_generator = await get_block_generator(blockchain.lookup_block_generators, unf)
             assert block_generator is not None
             block_bytes = bytes(unf)
             npc_result = await blockchain.run_generator(block_bytes, block_generator, height=softfork_height)
@@ -332,8 +336,11 @@ class TestBlockHeaderValidation:
             [],
         )
         npc_result = None
-        if unf.transactions_generator is not None:
-            block_generator = await blockchain.get_block_generator(unf)
+        # if this assert fires, remove it along with the pragma for the block
+        # below
+        assert unf.transactions_generator is None
+        if unf.transactions_generator is not None:  # pragma: no cover
+            block_generator = await get_block_generator(blockchain.lookup_block_generators, unf)
             assert block_generator is not None
             block_bytes = bytes(unf)
             npc_result = await blockchain.run_generator(block_bytes, block_generator, height=softfork_height)
@@ -420,8 +427,11 @@ class TestBlockHeaderValidation:
                     [],
                 )
                 npc_result = None
-                if block.transactions_generator is not None:
-                    block_generator = await blockchain.get_block_generator(unf)
+                # if this assert fires, remove it along with the pragma for the block
+                # below
+                assert block.transactions_generator is None
+                if block.transactions_generator is not None:  # pragma: no cover
+                    block_generator = await get_block_generator(blockchain.lookup_block_generators, unf)
                     assert block_generator is not None
                     block_bytes = bytes(unf)
                     npc_result = await blockchain.run_generator(block_bytes, block_generator, height=softfork_height)
@@ -1804,12 +1814,21 @@ class TestPreValidation:
     async def test_pre_validation_fails_bad_blocks(self, empty_blockchain: Blockchain, bt: BlockTools) -> None:
         blocks = bt.get_consecutive_blocks(2)
         await _validate_and_add_block(empty_blockchain, blocks[0])
-
+        ssi = empty_blockchain.constants.SUB_SLOT_ITERS_STARTING
+        difficulty = empty_blockchain.constants.DIFFICULTY_STARTING
         block_bad = recursive_replace(
             blocks[-1], "reward_chain_block.total_iters", blocks[-1].reward_chain_block.total_iters + 1
         )
-        res = await empty_blockchain.pre_validate_blocks_multiprocessing(
-            [blocks[0], block_bad], {}, validate_signatures=True
+        res = await pre_validate_blocks_multiprocessing(
+            empty_blockchain.constants,
+            empty_blockchain,
+            [blocks[0], block_bad],
+            empty_blockchain.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=difficulty,
+            prev_ses_block=None,
+            validate_signatures=True,
         )
         assert res[0].error is None
         assert res[1].error is not None
@@ -1823,12 +1842,22 @@ class TestPreValidation:
         n_at_a_time = min(available_logical_cores(), 32)
         times_pv = []
         times_rb = []
+        ssi = empty_blockchain.constants.SUB_SLOT_ITERS_STARTING
+        difficulty = empty_blockchain.constants.DIFFICULTY_STARTING
         for i in range(0, len(blocks), n_at_a_time):
             end_i = min(i + n_at_a_time, len(blocks))
             blocks_to_validate = blocks[i:end_i]
             start_pv = time.time()
-            res = await empty_blockchain.pre_validate_blocks_multiprocessing(
-                blocks_to_validate, {}, validate_signatures=True
+            res = await pre_validate_blocks_multiprocessing(
+                empty_blockchain.constants,
+                empty_blockchain,
+                blocks_to_validate,
+                empty_blockchain.pool,
+                {},
+                sub_slot_iters=ssi,
+                difficulty=difficulty,
+                prev_ses_block=None,
+                validate_signatures=True,
             )
             end_pv = time.time()
             times_pv.append(end_pv - start_pv)
@@ -1838,7 +1867,7 @@ class TestPreValidation:
                 assert res[n].error is None
                 block = blocks_to_validate[n]
                 start_rb = time.time()
-                result, err, _ = await empty_blockchain.add_block(block, res[n], None)
+                result, err, _ = await empty_blockchain.add_block(block, res[n], None, ssi)
                 end_rb = time.time()
                 times_rb.append(end_rb - start_rb)
                 assert err is None
@@ -1889,7 +1918,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx1: SpendBundle = wt.generate_signed_transaction(
+        tx1 = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         coin1: Coin = tx1.additions()[0]
@@ -1914,9 +1943,7 @@ class TestBodyValidation:
             opcode: [ConditionWithArgs(opcode, args + ([b"garbage"] if with_garbage else []))]
         }
 
-        tx2: SpendBundle = wt.generate_signed_transaction(
-            uint64(10), wt.get_new_puzzlehash(), coin1, condition_dic=conditions
-        )
+        tx2 = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), coin1, condition_dic=conditions)
         assert coin1 in tx2.removals()
 
         bundles = SpendBundle.aggregate([tx1, tx2])
@@ -1927,13 +1954,22 @@ class TestBodyValidation:
             transaction_data=bundles,
             time_per_block=10,
         )
-
-        pre_validation_results: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-            [blocks[-1]], {}, validate_signatures=False
+        ssi = b.constants.SUB_SLOT_ITERS_STARTING
+        diff = b.constants.DIFFICULTY_STARTING
+        pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            [blocks[-1]],
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=False,
         )
         # Ignore errors from pre-validation, we are testing block_body_validation
         repl_preval_results = replace(pre_validation_results[0], error=None, required_iters=uint64(1))
-        code, err, state_change = await b.add_block(blocks[-1], repl_preval_results, None)
+        code, err, state_change = await b.add_block(blocks[-1], repl_preval_results, None, sub_slot_iters=ssi)
         assert code == AddBlockResult.NEW_PEAK
         assert err is None
         assert state_change is not None
@@ -2033,9 +2069,7 @@ class TestBodyValidation:
             conditions = {opcode: [ConditionWithArgs(opcode, [int_to_bytes(lock_value)])]}
 
             coin = blocks[-1].get_included_reward_coins()[0]
-            tx: SpendBundle = wt.generate_signed_transaction(
-                uint64(10), wt.get_new_puzzlehash(), coin, condition_dic=conditions
-            )
+            tx = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), coin, condition_dic=conditions)
 
             blocks = bt.get_consecutive_blocks(
                 1,
@@ -2044,12 +2078,21 @@ class TestBodyValidation:
                 transaction_data=tx,
                 time_per_block=10,
             )
-
-            pre_validation_results: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-                [blocks[-1]], {}, validate_signatures=True
+            ssi = b.constants.SUB_SLOT_ITERS_STARTING
+            diff = b.constants.DIFFICULTY_STARTING
+            pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+                b.constants,
+                b,
+                [blocks[-1]],
+                b.pool,
+                {},
+                sub_slot_iters=ssi,
+                difficulty=diff,
+                prev_ses_block=None,
+                validate_signatures=True,
             )
             assert pre_validation_results is not None
-            assert (await b.add_block(blocks[-1], pre_validation_results[0], None))[0] == expected
+            assert (await b.add_block(blocks[-1], pre_validation_results[0], None, sub_slot_iters=ssi))[0] == expected
 
             if expected == AddBlockResult.NEW_PEAK:
                 # ensure coin was in fact spent
@@ -2094,7 +2137,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx1: SpendBundle = wt.generate_signed_transaction(
+        tx1 = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         coin1: Coin = tx1.additions()[0]
@@ -2105,9 +2148,7 @@ class TestBodyValidation:
         args = [bytes(public_key), b"msg"] + ([b"garbage"] if with_garbage else [])
         conditions = {opcode: [ConditionWithArgs(opcode, args)]}
 
-        tx2: SpendBundle = wt.generate_signed_transaction(
-            uint64(10), wt.get_new_puzzlehash(), coin1, condition_dic=conditions
-        )
+        tx2 = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), coin1, condition_dic=conditions)
         assert coin1 in tx2.removals()
 
         bundles = SpendBundle.aggregate([tx1, tx2])
@@ -2118,13 +2159,22 @@ class TestBodyValidation:
             transaction_data=bundles,
             time_per_block=10,
         )
-
-        pre_validation_results: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-            [blocks[-1]], {}, validate_signatures=False
+        ssi = b.constants.SUB_SLOT_ITERS_STARTING
+        diff = b.constants.DIFFICULTY_STARTING
+        pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            [blocks[-1]],
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=False,
         )
         # Ignore errors from pre-validation, we are testing block_body_validation
         repl_preval_results = replace(pre_validation_results[0], error=None, required_iters=uint64(1))
-        res, error, state_change = await b.add_block(blocks[-1], repl_preval_results, None)
+        res, error, state_change = await b.add_block(blocks[-1], repl_preval_results, None, sub_slot_iters=ssi)
         assert res == AddBlockResult.NEW_PEAK
         assert error is None
         assert state_change is not None and state_change.fork_height == uint32(2)
@@ -2219,13 +2269,11 @@ class TestBodyValidation:
                 opcode: [ConditionWithArgs(opcode, [int_to_bytes(lock_value)] + ([b"garbage"] if with_garbage else []))]
             }
 
-            tx1: SpendBundle = wt.generate_signed_transaction(
+            tx1 = wt.generate_signed_transaction(
                 uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
             )
             coin1: Coin = tx1.additions()[0]
-            tx2: SpendBundle = wt.generate_signed_transaction(
-                uint64(10), wt.get_new_puzzlehash(), coin1, condition_dic=conditions
-            )
+            tx2 = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), coin1, condition_dic=conditions)
             assert coin1 in tx2.removals()
             coin2: Coin = tx2.additions()[0]
 
@@ -2237,12 +2285,21 @@ class TestBodyValidation:
                 transaction_data=bundles,
                 time_per_block=10,
             )
-
-            pre_validation_results: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-                [blocks[-1]], {}, validate_signatures=True
+            ssi = b.constants.SUB_SLOT_ITERS_STARTING
+            diff = b.constants.DIFFICULTY_STARTING
+            pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+                b.constants,
+                b,
+                [blocks[-1]],
+                b.pool,
+                {},
+                sub_slot_iters=ssi,
+                difficulty=diff,
+                prev_ses_block=None,
+                validate_signatures=True,
             )
             assert pre_validation_results is not None
-            assert (await b.add_block(blocks[-1], pre_validation_results[0], None))[0] == expected
+            assert (await b.add_block(blocks[-1], pre_validation_results[0], None, sub_slot_iters=ssi))[0] == expected
 
             if expected == AddBlockResult.NEW_PEAK:
                 # ensure coin1 was in fact spent
@@ -2451,7 +2508,7 @@ class TestBodyValidation:
         await _validate_and_add_block(b, blocks[3])
 
         wt: WalletTool = bt.get_pool_wallet_tool()
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         blocks = bt.get_consecutive_blocks(
@@ -2515,7 +2572,7 @@ class TestBodyValidation:
         # Hash should be correct when there is a ref list
         await _validate_and_add_block(b, blocks[-1])
         wt: WalletTool = bt.get_pool_wallet_tool()
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         blocks = bt.get_consecutive_blocks(5, block_list_input=blocks, guarantee_transaction_block=False)
@@ -2533,56 +2590,12 @@ class TestBodyValidation:
             block_list_input=blocks,
             guarantee_transaction_block=True,
             transaction_data=tx,
-            previous_generator=[blocks[-1].height],
+            block_refs=[blocks[-1].height],
         )
         block = blocks[-1]
-        if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-            # once the hard for activates, we don't use this form of block
-            # compression anymore
-            assert len(block.transactions_generator_ref_list) == 0
-            # the remaining tests assume a reflist
-            return
-        else:
-            assert len(block.transactions_generator_ref_list) > 0
-
-        block_2 = recursive_replace(block, "transactions_info.generator_refs_root", bytes([1] * 32))
-        block_2 = recursive_replace(
-            block_2, "foliage_transaction_block.transactions_info_hash", block_2.transactions_info.get_hash()
-        )
-        block_2 = recursive_replace(
-            block_2, "foliage.foliage_transaction_block_hash", block_2.foliage_transaction_block.get_hash()
-        )
-        new_m = block_2.foliage.foliage_transaction_block_hash
-        assert new_m is not None
-        new_fsb_sig = bt.get_plot_signature(new_m, block.reward_chain_block.proof_of_space.plot_public_key)
-        block_2 = recursive_replace(block_2, "foliage.foliage_transaction_block_signature", new_fsb_sig)
-
-        await _validate_and_add_block(
-            b, block_2, expected_error=Err.INVALID_TRANSACTIONS_GENERATOR_REFS_ROOT, skip_prevalidation=True
-        )
-
-        # Too many heights
-        block_2 = recursive_replace(block, "transactions_generator_ref_list", [block.height - 2, block.height - 1])
-        # Fails preval
-        await _validate_and_add_block(b, block_2, expected_error=Err.FAILED_GETTING_GENERATOR_MULTIPROCESSING)
-        # Fails add_block
-        await _validate_and_add_block_multi_error(
-            b,
-            block_2,
-            [Err.GENERATOR_REF_HAS_NO_GENERATOR, Err.INVALID_TRANSACTIONS_GENERATOR_REFS_ROOT],
-            skip_prevalidation=True,
-        )
-
-        # Not tx block
-        for h in range(0, block.height - 1):
-            block_2 = recursive_replace(block, "transactions_generator_ref_list", [h])
-            await _validate_and_add_block(b, block_2, expected_error=Err.FAILED_GETTING_GENERATOR_MULTIPROCESSING)
-            await _validate_and_add_block_multi_error(
-                b,
-                block_2,
-                [Err.GENERATOR_REF_HAS_NO_GENERATOR, Err.INVALID_TRANSACTIONS_GENERATOR_REFS_ROOT],
-                skip_prevalidation=True,
-            )
+        # once the hard fork activated, we no longer use this form of block
+        # compression anymore
+        assert len(block.transactions_generator_ref_list) == 0
 
     @pytest.mark.anyio
     async def test_cost_exceeds_max(
@@ -2607,7 +2620,7 @@ class TestBodyValidation:
             output = ConditionWithArgs(ConditionOpcode.CREATE_COIN, [bt.pool_ph, int_to_bytes(i)])
             condition_dict[ConditionOpcode.CREATE_COIN].append(output)
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0], condition_dic=condition_dict
         )
 
@@ -2616,7 +2629,7 @@ class TestBodyValidation:
         )
 
         assert blocks[-1].transactions_generator is not None
-        block_generator = BlockGenerator(blocks[-1].transactions_generator, [], [])
+        block_generator = BlockGenerator(blocks[-1].transactions_generator, [])
         npc_result = get_name_puzzle_conditions(
             block_generator,
             b.constants.MAX_BLOCK_COST_CLVM * 1000,
@@ -2624,13 +2637,27 @@ class TestBodyValidation:
             height=softfork_height,
             constants=bt.constants,
         )
-        err = (await b.add_block(blocks[-1], PreValidationResult(None, uint64(1), npc_result, True, uint32(0)), None))[
-            1
-        ]
+        ssi = b.constants.SUB_SLOT_ITERS_STARTING
+        diff = b.constants.DIFFICULTY_STARTING
+        err = (
+            await b.add_block(
+                blocks[-1],
+                PreValidationResult(None, uint64(1), npc_result.conds, True, uint32(0)),
+                None,
+                sub_slot_iters=ssi,
+            )
+        )[1]
         assert err in [Err.BLOCK_COST_EXCEEDS_MAX]
-
-        results: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-            [blocks[-1]], {}, validate_signatures=False
+        results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            [blocks[-1]],
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=False,
         )
         assert results is not None
         assert Err(results[0].error) == Err.BLOCK_COST_EXCEEDS_MAX
@@ -2658,7 +2685,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
 
@@ -2682,7 +2709,7 @@ class TestBodyValidation:
         new_fsb_sig = bt.get_plot_signature(new_m, block.reward_chain_block.proof_of_space.plot_public_key)
         block_2 = recursive_replace(block_2, "foliage.foliage_transaction_block_signature", new_fsb_sig)
         assert block_2.transactions_generator is not None
-        block_generator = BlockGenerator(block_2.transactions_generator, [], [])
+        block_generator = BlockGenerator(block_2.transactions_generator, [])
         assert block.transactions_info is not None
         npc_result = get_name_puzzle_conditions(
             block_generator,
@@ -2691,7 +2718,10 @@ class TestBodyValidation:
             height=softfork_height,
             constants=bt.constants,
         )
-        _, err, _ = await b.add_block(block_2, PreValidationResult(None, uint64(1), npc_result, False, uint32(0)), None)
+        ssi = b.constants.SUB_SLOT_ITERS_STARTING
+        _, err, _ = await b.add_block(
+            block_2, PreValidationResult(None, uint64(1), npc_result.conds, False, uint32(0)), None, sub_slot_iters=ssi
+        )
         assert err == Err.INVALID_BLOCK_COST
 
         # too low
@@ -2709,7 +2739,7 @@ class TestBodyValidation:
         new_fsb_sig = bt.get_plot_signature(new_m, block.reward_chain_block.proof_of_space.plot_public_key)
         block_2 = recursive_replace(block_2, "foliage.foliage_transaction_block_signature", new_fsb_sig)
         assert block_2.transactions_generator is not None
-        block_generator = BlockGenerator(block_2.transactions_generator, [], [])
+        block_generator = BlockGenerator(block_2.transactions_generator, [])
         assert block.transactions_info is not None
         npc_result = get_name_puzzle_conditions(
             block_generator,
@@ -2718,7 +2748,9 @@ class TestBodyValidation:
             height=softfork_height,
             constants=bt.constants,
         )
-        _, err, _ = await b.add_block(block_2, PreValidationResult(None, uint64(1), npc_result, False, uint32(0)), None)
+        _, err, _ = await b.add_block(
+            block_2, PreValidationResult(None, uint64(1), npc_result.conds, False, uint32(0)), None, sub_slot_iters=ssi
+        )
         assert err == Err.INVALID_BLOCK_COST
 
         # too high
@@ -2737,7 +2769,7 @@ class TestBodyValidation:
         block_2 = recursive_replace(block_2, "foliage.foliage_transaction_block_signature", new_fsb_sig)
 
         assert block_2.transactions_generator is not None
-        block_generator = BlockGenerator(block_2.transactions_generator, [], [])
+        block_generator = BlockGenerator(block_2.transactions_generator, [])
         max_cost = (
             min(b.constants.MAX_BLOCK_COST_CLVM * 1000, block.transactions_info.cost)
             if block.transactions_info is not None
@@ -2748,7 +2780,7 @@ class TestBodyValidation:
         )
 
         result, err, _ = await b.add_block(
-            block_2, PreValidationResult(None, uint64(1), npc_result, False, uint32(0)), None
+            block_2, PreValidationResult(None, uint64(1), npc_result.conds, False, uint32(0)), None, sub_slot_iters=ssi
         )
         assert err == Err.INVALID_BLOCK_COST
 
@@ -2789,7 +2821,7 @@ class TestBodyValidation:
         #     output = ConditionWithArgs(ConditionOpcode.CREATE_COIN, [bt_2.pool_ph, int_to_bytes(2 ** 64)])
         #     condition_dict[ConditionOpcode.CREATE_COIN].append(output)
 
-        #     tx: SpendBundle = wt.generate_signed_transaction_multiple_coins(
+        #     tx = wt.generate_signed_transaction_multiple_coins(
         #         uint64(10),
         #         wt.get_new_puzzlehash(),
         #         blocks[1].get_included_reward_coins(),
@@ -2817,7 +2849,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
 
@@ -2868,7 +2900,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
 
@@ -2908,7 +2940,7 @@ class TestBodyValidation:
             output = ConditionWithArgs(ConditionOpcode.CREATE_COIN, [bt.pool_ph, int_to_bytes(1)])
             condition_dict[ConditionOpcode.CREATE_COIN].append(output)
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0], condition_dic=condition_dict
         )
 
@@ -2933,10 +2965,10 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
-        tx_2: SpendBundle = wt.generate_signed_transaction(
+        tx_2 = wt.generate_signed_transaction(
             uint64(11), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         agg = SpendBundle.aggregate([tx, tx_2])
@@ -2962,7 +2994,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
 
@@ -2971,7 +3003,7 @@ class TestBodyValidation:
         )
         await _validate_and_add_block(b, blocks[-1])
 
-        tx_2: SpendBundle = wt.generate_signed_transaction(
+        tx_2 = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-2].get_included_reward_coins()[0]
         )
         blocks = bt.get_consecutive_blocks(
@@ -2996,7 +3028,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         blocks = bt.get_consecutive_blocks(
@@ -3005,7 +3037,7 @@ class TestBodyValidation:
         await _validate_and_add_block(b, blocks[-1])
 
         new_coin: Coin = tx.additions()[0]
-        tx_2: SpendBundle = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), new_coin)
+        tx_2 = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), new_coin)
         # This is fine because coin exists
         blocks = bt.get_consecutive_blocks(
             1, block_list_input=blocks, guarantee_transaction_block=True, transaction_data=tx_2
@@ -3062,7 +3094,7 @@ class TestBodyValidation:
             calculate_base_farmer_reward(blocks_reorg[-1].height),
             bt.constants.GENESIS_CHALLENGE,
         )
-        tx_3: SpendBundle = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), farmer_coin)
+        tx_3 = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), farmer_coin)
 
         blocks_reorg = bt.get_consecutive_blocks(
             1, block_list_input=blocks_reorg, guarantee_transaction_block=True, transaction_data=tx_3
@@ -3095,9 +3127,7 @@ class TestBodyValidation:
         output = ConditionWithArgs(ConditionOpcode.CREATE_COIN, [bt.pool_ph, int_to_bytes(spend.amount)])
         condition_dict = {ConditionOpcode.CREATE_COIN: [output]}
 
-        tx: SpendBundle = wt.generate_signed_transaction(
-            uint64(10), wt.get_new_puzzlehash(), spend, condition_dic=condition_dict
-        )
+        tx = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), spend, condition_dic=condition_dict)
 
         blocks = bt.get_consecutive_blocks(
             1, block_list_input=blocks, guarantee_transaction_block=True, transaction_data=tx
@@ -3126,7 +3156,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
 
@@ -3168,7 +3198,7 @@ class TestBodyValidation:
 
         wt: WalletTool = bt.get_pool_wallet_tool()
 
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0]
         )
         blocks = bt.get_consecutive_blocks(
@@ -3195,7 +3225,19 @@ class TestBodyValidation:
         await _validate_and_add_block(b, last_block, expected_error=Err.BAD_AGGREGATE_SIGNATURE, use_bls_cache=True)
 
         # Bad signature also fails in prevalidation
-        preval_results = await b.pre_validate_blocks_multiprocessing([last_block], {}, validate_signatures=True)
+        ssi = b.constants.SUB_SLOT_ITERS_STARTING
+        diff = b.constants.DIFFICULTY_STARTING
+        preval_results = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            [last_block],
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=True,
+        )
         assert preval_results is not None
         assert preval_results[0].error == Err.BAD_AGGREGATE_SIGNATURE.value
 
@@ -3301,15 +3343,27 @@ class TestReorgs:
         blocks = default_10000_blocks[:num_blocks_chain_1]
 
         print(f"pre-validating {len(blocks)} blocks")
-        pre_validation_results: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-            blocks, {}, validate_signatures=False
+        ssi = b.constants.SUB_SLOT_ITERS_STARTING
+        diff = b.constants.DIFFICULTY_STARTING
+        pre_validation_results: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            blocks,
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=False,
         )
-
         for i, block in enumerate(blocks):
+            if block.height != 0 and len(block.finished_sub_slots) > 0:
+                if block.finished_sub_slots[0].challenge_chain.new_sub_slot_iters is not None:
+                    ssi = block.finished_sub_slots[0].challenge_chain.new_sub_slot_iters
             assert pre_validation_results[i].error is None
             if (block.height % 100) == 0:
                 print(f"main chain: {block.height:4} weight: {block.weight}")
-            (result, err, _) = await b.add_block(block, pre_validation_results[i], None)
+            (result, err, _) = await b.add_block(block, pre_validation_results[i], None, sub_slot_iters=ssi)
             await check_block_store_invariant(b)
             assert err is None
             assert result == AddBlockResult.NEW_PEAK
@@ -3396,6 +3450,7 @@ class TestReorgs:
         # can catch up
         fork_block = default_10000_blocks[num_blocks_chain_2_start - 200]
         fork_info = ForkInfo(fork_block.height, fork_block.height, fork_block.header_hash)
+        await b.warmup(fork_block.height)
         for block in blocks:
             if (block.height % 128) == 0:
                 peak = b.get_peak()
@@ -3524,7 +3579,7 @@ class TestReorgs:
         await _validate_and_add_block(b, blocks[1])
         await _validate_and_add_block(b, blocks[2])
         wt: WalletTool = bt.get_pool_wallet_tool()
-        tx: SpendBundle = wt.generate_signed_transaction(
+        tx = wt.generate_signed_transaction(
             uint64(10), wt.get_new_puzzlehash(), blocks[2].get_included_reward_coins()[0]
         )
         blocks = bt.get_consecutive_blocks(
@@ -3619,7 +3674,7 @@ async def test_reorg_new_ref(empty_blockchain: Blockchain, bt: BlockTools) -> No
 
     spend_bundle2 = wallet_a.generate_signed_transaction(uint64(1_000), receiver_puzzlehash, all_coins.pop())
     blocks_reorg_chain = bt.get_consecutive_blocks(
-        4, blocks_reorg_chain, seed=b"2", previous_generator=[uint32(5), uint32(11)], transaction_data=spend_bundle2
+        4, blocks_reorg_chain, seed=b"2", block_refs=[uint32(5), uint32(11)], transaction_data=spend_bundle2
     )
     blocks_reorg_chain = bt.get_consecutive_blocks(4, blocks_reorg_chain, seed=b"2")
 
@@ -3627,8 +3682,15 @@ async def test_reorg_new_ref(empty_blockchain: Blockchain, bt: BlockTools) -> No
         fork_info: Optional[ForkInfo] = None
         if i < 10:
             expected = AddBlockResult.ALREADY_HAVE_BLOCK
-        elif i < 20:
+        elif i < 19:
             expected = AddBlockResult.ADDED_AS_ORPHAN
+        elif i == 19:
+            # same height as peak decide by iterations
+            peak = b.get_peak()
+            assert peak is not None
+            # same height as peak should be ADDED_AS_ORPHAN if  block.total_iters >= peak.total_iters
+            assert block.total_iters < peak.total_iters
+            expected = AddBlockResult.NEW_PEAK
         else:
             expected = AddBlockResult.NEW_PEAK
             if fork_info is None:
@@ -3678,7 +3740,7 @@ async def test_reorg_stale_fork_height(empty_blockchain: Blockchain, bt: BlockTo
 
     # this block (height 10) refers back to the generator in block 5
     spend_bundle2 = wallet_a.generate_signed_transaction(uint64(1_000), receiver_puzzlehash, all_coins.pop())
-    blocks = bt.get_consecutive_blocks(4, blocks, previous_generator=[uint32(5)], transaction_data=spend_bundle2)
+    blocks = bt.get_consecutive_blocks(4, blocks, block_refs=[uint32(5)], transaction_data=spend_bundle2)
 
     for block in blocks[:5]:
         await _validate_and_add_block(b, block, expected_result=AddBlockResult.NEW_PEAK)
@@ -3788,7 +3850,7 @@ async def test_reorg_flip_flop(empty_blockchain: Blockchain, bt: BlockTools) -> 
     chain_a = bt.get_consecutive_blocks(
         5,
         chain_a,
-        previous_generator=[uint32(10)],
+        block_refs=[uint32(10)],
         transaction_data=spend_bundle,
         guarantee_transaction_block=True,
     )
@@ -3828,13 +3890,13 @@ async def test_reorg_flip_flop(empty_blockchain: Blockchain, bt: BlockTools) -> 
     )
 
     spend_bundle = wallet_a.generate_signed_transaction(uint64(1_000), receiver_puzzlehash, all_coins.pop())
-    chain_b = bt.get_consecutive_blocks(
-        10, chain_b, seed=b"2", previous_generator=[uint32(15)], transaction_data=spend_bundle
-    )
+    chain_b = bt.get_consecutive_blocks(10, chain_b, seed=b"2", block_refs=[uint32(15)], transaction_data=spend_bundle)
 
     assert len(chain_a) == len(chain_b)
 
     counter = 0
+    ssi = b.constants.SUB_SLOT_ITERS_STARTING
+    diff = b.constants.DIFFICULTY_STARTING
     for b1, b2 in zip(chain_a, chain_b):
         # alternate the order we add blocks from the two chains, to ensure one
         # chain overtakes the other one in weight every other time
@@ -3844,13 +3906,31 @@ async def test_reorg_flip_flop(empty_blockchain: Blockchain, bt: BlockTools) -> 
             block1, block2 = b1, b2
         counter += 1
 
-        preval: List[PreValidationResult] = await b.pre_validate_blocks_multiprocessing(
-            [block1], {}, validate_signatures=False
+        preval: List[PreValidationResult] = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            [block1],
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=False,
         )
-        _, err, _ = await b.add_block(block1, preval[0], None)
+        _, err, _ = await b.add_block(block1, preval[0], None, sub_slot_iters=ssi)
         assert err is None
-        preval = await b.pre_validate_blocks_multiprocessing([block2], {}, validate_signatures=False)
-        _, err, _ = await b.add_block(block2, preval[0], None)
+        preval = await pre_validate_blocks_multiprocessing(
+            b.constants,
+            b,
+            [block2],
+            b.pool,
+            {},
+            sub_slot_iters=ssi,
+            difficulty=diff,
+            prev_ses_block=None,
+            validate_signatures=False,
+        )
+        _, err, _ = await b.add_block(block2, preval[0], None, sub_slot_iters=ssi)
         assert err is None
 
     peak = b.get_peak()
@@ -3872,13 +3952,24 @@ async def test_reorg_flip_flop(empty_blockchain: Blockchain, bt: BlockTools) -> 
 async def test_get_tx_peak(default_400_blocks: List[FullBlock], empty_blockchain: Blockchain) -> None:
     bc = empty_blockchain
     test_blocks = default_400_blocks[:100]
-
-    res = await bc.pre_validate_blocks_multiprocessing(test_blocks, {}, validate_signatures=False)
+    ssi = bc.constants.SUB_SLOT_ITERS_STARTING
+    diff = bc.constants.DIFFICULTY_STARTING
+    res = await pre_validate_blocks_multiprocessing(
+        bc.constants,
+        bc,
+        test_blocks,
+        bc.pool,
+        {},
+        sub_slot_iters=ssi,
+        difficulty=diff,
+        prev_ses_block=None,
+        validate_signatures=False,
+    )
 
     last_tx_block_record = None
     for b, prevalidation_res in zip(test_blocks, res):
         assert bc.get_tx_peak() == last_tx_block_record
-        _, err, _ = await bc.add_block(b, prevalidation_res, None)
+        _, err, _ = await bc.add_block(b, prevalidation_res, None, sub_slot_iters=ssi)
         assert err is None
 
         if b.is_transaction_block():
@@ -3888,8 +3979,122 @@ async def test_get_tx_peak(default_400_blocks: List[FullBlock], empty_blockchain
                 bc,
                 prevalidation_res.required_iters,
                 b,
-                None,
+                empty_blockchain.constants.SUB_SLOT_ITERS_STARTING,
             )
             last_tx_block_record = block_record
 
     assert bc.get_tx_peak() == last_tx_block_record
+
+
+def to_bytes(gen: Optional[SerializedProgram]) -> bytes:
+    assert gen is not None
+    return bytes(gen)
+
+
+@pytest.mark.anyio
+@pytest.mark.limit_consensus_modes(reason="block heights for generators differ between test chains in different modes")
+@pytest.mark.parametrize("clear_cache", [True, False])
+async def test_lookup_block_generators(
+    default_10000_blocks: List[FullBlock],
+    test_long_reorg_blocks_light: List[FullBlock],
+    bt: BlockTools,
+    empty_blockchain: Blockchain,
+    clear_cache: bool,
+) -> None:
+    b = empty_blockchain
+    blocks_1 = default_10000_blocks
+    blocks_2 = test_long_reorg_blocks_light
+
+    # this test blockchain is expected to have block generators at these
+    # heights:
+    # 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    # 24, 25, 26, 28
+
+    # default_10000_blocks and test_long_reorg_blocks_light diverge at height
+    # 500. Add blocks from both past the fork to be able to test both
+
+    # fork 1 is expected to have generators at these heights:
+    # 503, 507, 511, 517, 524, 529, 532, 533, 534, 539, 542, 543, 546, 547
+
+    # fork 2 is expected to have generators at these heights:
+    # 507, 516, 527, 535, 539, 543, 547
+
+    # start with adding some blocks to test lookups from the mainchain
+    for block in blocks_2[:550]:
+        await _validate_and_add_block(b, block, expected_result=AddBlockResult.NEW_PEAK)
+
+    for block in blocks_1[500:550]:
+        await _validate_and_add_block(b, block, expected_result=AddBlockResult.ADDED_AS_ORPHAN)
+
+    # now we have a blockchain with two forks, the peak is at blocks_2[550] and
+    # the leight weight peak is at blocks_1[550]
+    # make sure we can lookup block generators from each fork
+
+    peak_1 = blocks_1[550]
+    peak_2 = blocks_2[550]
+
+    # single generators, from the shared part of the chain
+    for peak in [peak_1, peak_2]:
+        if clear_cache:
+            b.clean_block_records()
+        generators = await b.lookup_block_generators(peak.prev_header_hash, {uint32(2)})
+        assert generators == {
+            uint32(2): to_bytes(blocks_1[2].transactions_generator),
+        }
+
+    # multiple generators from the shared part of the chain
+    for peak in [peak_1, peak_2]:
+        if clear_cache:
+            b.clean_block_records()
+        generators = await b.lookup_block_generators(peak.prev_header_hash, {uint32(2), uint32(10), uint32(26)})
+        assert generators == {
+            uint32(2): to_bytes(blocks_1[2].transactions_generator),
+            uint32(10): to_bytes(blocks_1[10].transactions_generator),
+            uint32(26): to_bytes(blocks_1[26].transactions_generator),
+        }
+
+    # lookups from the past the fork
+    if clear_cache:
+        b.clean_block_records()
+    generators = await b.lookup_block_generators(peak_1.prev_header_hash, {uint32(503)})
+    assert generators == {uint32(503): to_bytes(blocks_1[503].transactions_generator)}
+
+    if clear_cache:
+        b.clean_block_records()
+    generators = await b.lookup_block_generators(peak_2.prev_header_hash, {uint32(516)})
+    assert generators == {uint32(516): to_bytes(blocks_2[516].transactions_generator)}
+
+    # make sure we don't cross the forks
+    if clear_cache:
+        b.clean_block_records()
+    with pytest.raises(ValueError, match="Err.GENERATOR_REF_HAS_NO_GENERATOR"):
+        await b.lookup_block_generators(peak_1.prev_header_hash, {uint32(516)})
+
+    if clear_cache:
+        b.clean_block_records()
+    with pytest.raises(ValueError, match="Err.GENERATOR_REF_HAS_NO_GENERATOR"):
+        await b.lookup_block_generators(peak_2.prev_header_hash, {uint32(503)})
+
+    # make sure we fail when looking up a non-transaction block from the main
+    # chain, regardless of which chain we start at
+    if clear_cache:
+        b.clean_block_records()
+    with pytest.raises(ValueError, match="Err.GENERATOR_REF_HAS_NO_GENERATOR"):
+        await b.lookup_block_generators(peak_1.prev_header_hash, {uint32(8)})
+
+    if clear_cache:
+        b.clean_block_records()
+    with pytest.raises(ValueError, match="Err.GENERATOR_REF_HAS_NO_GENERATOR"):
+        await b.lookup_block_generators(peak_2.prev_header_hash, {uint32(8)})
+
+    # if we try to look up generators starting from a disconnected block, we
+    # fail
+    if clear_cache:
+        b.clean_block_records()
+    with pytest.raises(AssertionError):
+        await b.lookup_block_generators(blocks_2[600].prev_header_hash, {uint32(3)})
+
+    if clear_cache:
+        b.clean_block_records()
+    with pytest.raises(AssertionError):
+        await b.lookup_block_generators(blocks_1[600].prev_header_hash, {uint32(3)})

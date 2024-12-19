@@ -11,7 +11,7 @@ from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.condition_opcodes import ConditionOpcode
 from chia.types.condition_with_args import ConditionWithArgs
-from chia.types.spend_bundle_conditions import Spend, SpendBundleConditions
+from chia.types.spend_bundle_conditions import SpendBundleConditions, SpendConditions
 from chia.util.condition_tools import parse_sexp_to_conditions, pkm_pairs, pkm_pairs_for_conditions_dict
 from chia.util.errors import ConsensusError
 from chia.util.hash import std_hash
@@ -32,7 +32,7 @@ def mk_agg_sig_conditions(
     agg_sig_data: List[Tuple[G1Element, bytes]],
     agg_sig_unsafe_data: List[Tuple[G1Element, bytes]] = [],
 ) -> SpendBundleConditions:
-    spend = Spend(
+    spend = SpendConditions(
         coin_id=TEST_COIN.name(),
         parent_id=H1,
         puzzle_hash=H2,
@@ -53,7 +53,7 @@ def mk_agg_sig_conditions(
         agg_sig_puzzle_amount=agg_sig_data if opcode == ConditionOpcode.AGG_SIG_PUZZLE_AMOUNT else [],
         flags=0,
     )
-    return SpendBundleConditions([spend], 0, 0, 0, None, None, agg_sig_unsafe_data, 0, 0, 0)
+    return SpendBundleConditions([spend], 0, 0, 0, None, None, agg_sig_unsafe_data, 0, 0, 0, False)
 
 
 @pytest.mark.parametrize(
@@ -100,7 +100,7 @@ def test_pkm_pairs_vs_for_conditions_dict(opcode: ConditionOpcode) -> None:
 
 class TestPkmPairs:
     def test_empty_list(self) -> None:
-        conds = SpendBundleConditions([], 0, 0, 0, None, None, [], 0, 0, 0)
+        conds = SpendBundleConditions([], 0, 0, 0, None, None, [], 0, 0, 0, False)
         pks, msgs = pkm_pairs(conds, b"foobar")
         assert pks == []
         assert msgs == []

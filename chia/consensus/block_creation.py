@@ -10,7 +10,7 @@ from chiabip158 import PyBIP158
 
 from chia.consensus.block_record import BlockRecord
 from chia.consensus.block_rewards import calculate_base_farmer_reward, calculate_pool_reward
-from chia.consensus.blockchain_interface import BlockchainInterface
+from chia.consensus.blockchain_interface import BlockRecordsProtocol
 from chia.consensus.coinbase import create_farmer_coin, create_pool_coin
 from chia.consensus.constants import ConsensusConstants
 from chia.consensus.cost_calculator import NPCResult
@@ -59,7 +59,7 @@ def create_foliage(
     additions: List[Coin],
     removals: List[Coin],
     prev_block: Optional[BlockRecord],
-    blocks: BlockchainInterface,
+    blocks: BlockRecordsProtocol,
     total_iters_sp: uint128,
     timestamp: uint64,
     farmer_reward_puzzlehash: bytes32,
@@ -137,8 +137,6 @@ def create_foliage(
         assert prev_block is not None
         prev_block_hash = prev_block.header_hash
 
-    generator_block_heights_list: List[uint32] = []
-
     foliage_transaction_block_hash: Optional[bytes32]
 
     if is_transaction_block:
@@ -146,7 +144,6 @@ def create_foliage(
 
         # Calculate the cost of transactions
         if block_generator is not None:
-            generator_block_heights_list = block_generator.block_height_list
             cost = compute_cost(block_generator, constants, height)
 
             spend_bundle_fees = compute_fees(additions, removals)
@@ -229,10 +226,6 @@ def create_foliage(
             generator_hash = std_hash(block_generator.program)
 
         generator_refs_hash = bytes32([1] * 32)
-        if generator_block_heights_list not in (None, []):
-            generator_ref_list_bytes = b"".join([i.stream_to_bytes() for i in generator_block_heights_list])
-            generator_refs_hash = std_hash(generator_ref_list_bytes)
-
         filter_hash: bytes32 = std_hash(encoded)
 
         transactions_info: Optional[TransactionsInfo] = TransactionsInfo(
@@ -298,7 +291,7 @@ def create_unfinished_block(
     get_pool_signature: Callable[[PoolTarget, Optional[G1Element]], Optional[G2Element]],
     signage_point: SignagePoint,
     timestamp: uint64,
-    blocks: BlockchainInterface,
+    blocks: BlockRecordsProtocol,
     seed: bytes = b"",
     block_generator: Optional[BlockGenerator] = None,
     aggregate_sig: G2Element = G2Element(),
@@ -423,7 +416,7 @@ def create_unfinished_block(
         foliage_transaction_block,
         transactions_info,
         block_generator.program if block_generator else None,
-        block_generator.block_height_list if block_generator else [],
+        [],  # generator_refs
     )
 
 
@@ -437,7 +430,7 @@ def unfinished_block_to_full_block(
     icc_ip_proof: Optional[VDFProof],
     finished_sub_slots: List[EndOfSubSlotBundle],
     prev_block: Optional[BlockRecord],
-    blocks: BlockchainInterface,
+    blocks: BlockRecordsProtocol,
     total_iters_sp: uint128,
     difficulty: uint64,
 ) -> FullBlock:

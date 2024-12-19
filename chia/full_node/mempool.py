@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from time import monotonic
 from typing import Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from chia_rs import AugSchemeMPL, Coin, G2Element
@@ -228,16 +229,14 @@ class Mempool:
     # TODO: move "process_mempool_items()" into this class in order to do this a
     # bit more efficiently
     def items_by_feerate(self) -> Iterator[MempoolItem]:
-        with self._db_conn:
-            cursor = self._db_conn.execute("SELECT * FROM tx ORDER BY fee_per_cost DESC, seq ASC")
-            for row in cursor:
-                yield self._row_to_item(row)
+        cursor = self._db_conn.execute("SELECT * FROM tx ORDER BY fee_per_cost DESC, seq ASC")
+        for row in cursor:
+            yield self._row_to_item(row)
 
     def size(self) -> int:
-        with self._db_conn:
-            cursor = self._db_conn.execute("SELECT Count(name) FROM tx")
-            val = cursor.fetchone()
-            return 0 if val is None else int(val[0])
+        cursor = self._db_conn.execute("SELECT COUNT(name) FROM tx")
+        row = cursor.fetchone()
+        return int(row[0])
 
     def get_item_by_id(self, item_id: bytes32) -> Optional[MempoolItem]:
         with self._db_conn:
@@ -266,12 +265,11 @@ class Mempool:
         items: List[MempoolItem] = []
         for batch in to_batches(spent_coin_ids, SQLITE_MAX_VARIABLE_NUMBER):
             args = ",".join(["?"] * len(batch.entries))
-            with self._db_conn:
-                cursor = self._db_conn.execute(
-                    f"SELECT * FROM tx WHERE name IN (SELECT tx FROM spends WHERE coin_id IN ({args}))",
-                    tuple(batch.entries),
-                )
-                items.extend(self._row_to_item(row) for row in cursor)
+            cursor = self._db_conn.execute(
+                f"SELECT * FROM tx WHERE name IN (SELECT tx FROM spends WHERE coin_id IN ({args}))",
+                tuple(batch.entries),
+            )
+            items.extend(self._row_to_item(row) for row in cursor)
         return items
 
     def get_min_fee_rate(self, cost: int) -> Optional[float]:
@@ -495,8 +493,8 @@ class Mempool:
         coin_spends: List[CoinSpend] = []
         sigs: List[G2Element] = []
         log.info(f"Starting to make block, max cost: {self.mempool_info.max_block_clvm_cost}")
-        with self._db_conn:
-            cursor = self._db_conn.execute("SELECT name, fee FROM tx ORDER BY fee_per_cost DESC, seq ASC")
+        bundle_creation_start = monotonic()
+        cursor = self._db_conn.execute("SELECT name, fee FROM tx ORDER BY fee_per_cost DESC, seq ASC")
         skipped_items = 0
         for row in cursor:
             name = bytes32(row[0])
@@ -576,4 +574,10 @@ class Mempool:
         )
         aggregated_signature = AugSchemeMPL.aggregate(sigs)
         agg = SpendBundle(coin_spends, aggregated_signature)
+        bundle_creation_end = monotonic()
+        duration = bundle_creation_end - bundle_creation_start
+        log.log(
+            logging.INFO if duration < 1 else logging.WARNING,
+            f"create_bundle_from_mempool_items took {duration:0.4f} seconds",
+        )
         return agg, additions

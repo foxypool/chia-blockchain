@@ -13,7 +13,6 @@ from chia.types.blockchain_format.coin import Coin, coin_as_list
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.coin_spend import CoinSpend
-from chia.types.spend_bundle import SpendBundle
 from chia.util.byte_types import hexstr_to_bytes
 from chia.util.hash import std_hash
 from chia.util.ints import uint8, uint32, uint64, uint128
@@ -41,7 +40,6 @@ from chia.wallet.util.compute_hints import compute_spend_hints_and_additions
 from chia.wallet.util.compute_memos import compute_memos
 from chia.wallet.util.query_filter import HashFilter
 from chia.wallet.util.transaction_type import TransactionType
-from chia.wallet.util.tx_config import TXConfig
 from chia.wallet.util.wallet_sync_utils import fetch_coin_spend_for_coin_state
 from chia.wallet.util.wallet_types import CoinType, WalletType
 from chia.wallet.vc_wallet.cr_cat_drivers import (
@@ -59,6 +57,7 @@ from chia.wallet.wallet_action_scope import WalletActionScope
 from chia.wallet.wallet_coin_record import MetadataTypes, WalletCoinRecord
 from chia.wallet.wallet_info import WalletInfo
 from chia.wallet.wallet_protocol import GSTOptionalArgs, WalletProtocol
+from chia.wallet.wallet_spend_bundle import WalletSpendBundle
 
 if TYPE_CHECKING:
     from chia.wallet.wallet_state_manager import WalletStateManager
@@ -85,7 +84,6 @@ class CRCATWallet(CATWallet):
         wallet: Wallet,
         cat_tail_info: Dict[str, Any],
         amount: uint64,
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         fee: uint64 = uint64(0),
         name: Optional[str] = None,
@@ -243,7 +241,7 @@ class CRCATWallet(CATWallet):
                 self.log.info(f"Found pending approval CRCAT coin {coin.name().hex()}")
                 is_pending = True
                 created_timestamp = await self.wallet_state_manager.wallet_node.get_timestamp_for_height(uint32(height))
-                spend_bundle = SpendBundle([coin_spend], G2Element())
+                spend_bundle = WalletSpendBundle([coin_spend], G2Element())
                 memos = compute_memos(spend_bundle)
                 # This will override the tx created in the wallet state manager
                 tx_record = TransactionRecord(
@@ -400,27 +398,24 @@ class CRCATWallet(CATWallet):
     async def _generate_unsigned_spendbundle(
         self,
         payments: List[Payment],
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         fee: uint64 = uint64(0),
         cat_discrepancy: Optional[Tuple[int, Program, Program]] = None,  # (extra_delta, tail_reveal, tail_solution)
         coins: Optional[Set[Coin]] = None,
         extra_conditions: Tuple[Condition, ...] = tuple(),
         add_authorizations_to_cr_cats: bool = True,
-    ) -> SpendBundle:
+    ) -> WalletSpendBundle:
         if cat_discrepancy is not None:
             extra_delta, tail_reveal, tail_solution = cat_discrepancy
         else:
             extra_delta, tail_reveal, tail_solution = 0, Program.to([]), Program.to([])
         payment_amount: int = sum(p.amount for p in payments)
         starting_amount: int = payment_amount - extra_delta
-        if not add_authorizations_to_cr_cats:
-            tx_config = tx_config.override(reuse_puzhash=True)
         if coins is None:
             cat_coins = list(
                 await self.select_coins(
                     uint64(starting_amount),
-                    tx_config.coin_selection_config,
+                    action_scope,
                 )
             )
         else:
@@ -452,7 +447,11 @@ class CRCATWallet(CATWallet):
             if origin_crcat_record is None:
                 raise RuntimeError("A CR-CAT coin was selected that we don't have a record for")  # pragma: no cover
             origin_crcat = self.coin_record_to_crcat(origin_crcat_record)
-            if tx_config.reuse_puzhash:
+            if action_scope.config.tx_config.override(
+                reuse_puzhash=(
+                    True if not add_authorizations_to_cr_cats else action_scope.config.tx_config.reuse_puzhash
+                )
+            ).reuse_puzhash:
                 change_puzhash = origin_crcat.inner_puzzle_hash
                 for payment in payments:
                     if change_puzhash == payment.puzzle_hash and change == payment.amount:
@@ -514,7 +513,6 @@ class CRCATWallet(CATWallet):
                         await self.create_tandem_xch_tx(
                             fee,
                             uint64(regular_chia_to_claim),
-                            tx_config,
                             action_scope,
                             extra_conditions=(announcement.corresponding_assertion(),),
                         )
@@ -526,7 +524,6 @@ class CRCATWallet(CATWallet):
                         xch_announcement = await self.create_tandem_xch_tx(
                             fee,
                             uint64(regular_chia_to_claim),
-                            tx_config,
                             action_scope,
                         )
                         assert xch_announcement is not None
@@ -587,7 +584,6 @@ class CRCATWallet(CATWallet):
         if add_authorizations_to_cr_cats:
             await vc_wallet.generate_signed_transaction(
                 vc.launcher_id,
-                tx_config,
                 action_scope,
                 extra_conditions=(
                     *expected_announcements,
@@ -596,13 +592,12 @@ class CRCATWallet(CATWallet):
                 ),
             )
 
-        return SpendBundle(coin_spends, G2Element())
+        return WalletSpendBundle(coin_spends, G2Element())
 
     async def generate_signed_transaction(
         self,
         amounts: List[uint64],
         puzzle_hashes: List[bytes32],
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         fee: uint64 = uint64(0),
         coins: Optional[Set[Coin]] = None,
@@ -639,7 +634,6 @@ class CRCATWallet(CATWallet):
 
         spend_bundle = await self._generate_unsigned_spendbundle(
             payments,
-            tx_config,
             action_scope,
             fee,
             cat_discrepancy=cat_discrepancy,  # (extra_delta, tail_reveal, tail_solution)
@@ -683,7 +677,6 @@ class CRCATWallet(CATWallet):
     async def claim_pending_approval_balance(
         self,
         min_amount_to_claim: uint64,
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         fee: uint64 = uint64(0),
         coins: Optional[Set[Coin]] = None,
@@ -702,7 +695,7 @@ class CRCATWallet(CATWallet):
                 max_coin_amount = uint64(self.wallet_state_manager.constants.MAX_COIN_AMOUNT)
             coins = await select_coins(
                 await self.get_pending_approval_balance(),
-                tx_config.coin_selection_config,
+                action_scope.config.tx_config.coin_selection_config,
                 list(crcat_records),
                 {},
                 self.log,
@@ -713,7 +706,7 @@ class CRCATWallet(CATWallet):
         if fee > 0:
             chia_coins = await self.standard_wallet.select_coins(
                 fee,
-                tx_config.coin_selection_config,
+                action_scope,
             )
         else:
             chia_coins = set()
@@ -758,14 +751,13 @@ class CRCATWallet(CATWallet):
             vc.launcher_id,
             vc.wrap_inner_with_backdoor().get_tree_hash(),
         )
-        claim_bundle: SpendBundle = SpendBundle(coin_spends, G2Element())
+        claim_bundle = WalletSpendBundle(coin_spends, G2Element())
 
         # Make the Fee TX
         if fee > 0:
             await self.create_tandem_xch_tx(
                 fee,
                 uint64(0),
-                tx_config,
                 action_scope,
                 extra_conditions=tuple(expected_announcements),
             )
@@ -773,7 +765,6 @@ class CRCATWallet(CATWallet):
         # Make the VC TX
         await vc_wallet.generate_signed_transaction(
             vc.launcher_id,
-            tx_config,
             action_scope,
             extra_conditions=(
                 *extra_conditions,

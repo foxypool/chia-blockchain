@@ -6,9 +6,10 @@ import random
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pytest
-from chia_rs import G1Element, G2Element
+from chia_rs import G1Element, G2Element, get_flags_for_height_and_constants
 from clvm.casts import int_to_bytes
 from clvm_tools import binutils
+from clvm_tools.binutils import assemble
 
 from chia._tests.blockchain.blockchain_test_utils import _validate_and_add_block
 from chia._tests.connection_utils import add_dummy_connection, connect_and_get_peer
@@ -27,6 +28,7 @@ from chia._tests.util.misc import BenchmarkRunner, invariant_check_mempool
 from chia._tests.util.time_out_assert import time_out_assert
 from chia.consensus.condition_costs import ConditionCost
 from chia.consensus.cost_calculator import NPCResult
+from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.full_node.bitcoin_fee_estimator import create_bitcoin_fee_estimator
 from chia.full_node.fee_estimation import EmptyMempoolInfo, MempoolInfo
 from chia.full_node.full_node_api import FullNodeAPI
@@ -107,7 +109,7 @@ def make_item(
     return MempoolItem(
         SpendBundle([], G2Element()),
         fee,
-        SpendBundleConditions([], 0, 0, 0, None, None, [], cost, 0, 0),
+        SpendBundleConditions([], 0, 0, 0, None, None, [], cost, 0, 0, False),
         spend_bundle_name,
         uint32(0),
         assert_height,
@@ -2180,7 +2182,7 @@ def generator_condition_tester(
     prg = f"(q ((0x0101010101010101010101010101010101010101010101010101010101010101 {'(q ' if quote else ''} {conditions} {')' if quote else ''} {coin_amount} (() (q . ())))))"  # noqa
     print(f"program: {prg}")
     program = SerializedProgram.from_bytes(binutils.assemble(prg).as_bin())
-    generator = BlockGenerator(program, [], [])
+    generator = BlockGenerator(program, [])
     print(f"len: {len(bytes(program))}")
     npc_result: NPCResult = get_name_puzzle_conditions(
         generator, max_cost, mempool_mode=mempool_mode, height=height, constants=test_constants
@@ -2437,7 +2439,7 @@ class TestGeneratorConditions:
                 f'(q ((0x0101010101010101010101010101010101010101010101010101010101010101 (q (51 "{puzzle_hash}" 10)) 123 (() (q . ())))(0x0101010101010101010101010101010101010101010101010101010101010102 (q (51 "{puzzle_hash}" 10)) 123 (() (q . ()))) ))'  # noqa
             ).as_bin()
         )
-        generator = BlockGenerator(program, [], [])
+        generator = BlockGenerator(program, [])
         npc_result: NPCResult = get_name_puzzle_conditions(
             generator, MAX_BLOCK_COST_CLVM, mempool_mode=False, height=softfork_height, constants=test_constants
         )
@@ -2541,13 +2543,6 @@ class TestGeneratorConditions:
     ) -> None:
         npc_result = generator_condition_tester(condition, mempool_mode=mempool, height=softfork_height)
         print(npc_result)
-
-        # the message conditions are only activated with soft fork 4, so
-        # before then there are no errors.
-        # In mempool mode, the message conditions activated immediately.
-        if softfork_height < test_constants.SOFT_FORK4_HEIGHT and not mempool:
-            expect_error = None
-
         assert npc_result.error == expect_error
 
 
@@ -3184,6 +3179,80 @@ def test_get_puzzle_and_solution_for_coin_failure() -> None:
     with pytest.raises(
         ValueError, match=f"Failed to get puzzle and solution for coin {TEST_COIN}, error: \\('coin not found', '80'\\)"
     ):
-        get_puzzle_and_solution_for_coin(
-            BlockGenerator(SerializedProgram.to(None), [], []), TEST_COIN, 0, test_constants
+        get_puzzle_and_solution_for_coin(BlockGenerator(SerializedProgram.to(None), []), TEST_COIN, 0, test_constants)
+
+
+# TODO: import this from chia_rs once we bump the version we depend on
+ENABLE_KECCAK = 0x200
+ENABLE_KECCAK_OPS_OUTSIDE_GUARD = 0x100
+
+
+def test_flags_for_height() -> None:
+
+    # the keccak operator is supposed to be enabled at soft-fork 6 height
+    flags = get_flags_for_height_and_constants(DEFAULT_CONSTANTS.SOFT_FORK6_HEIGHT, DEFAULT_CONSTANTS)
+    print(f"{flags:x}")
+    assert (flags & ENABLE_KECCAK) != 0
+
+    flags = get_flags_for_height_and_constants(DEFAULT_CONSTANTS.SOFT_FORK6_HEIGHT - 1, DEFAULT_CONSTANTS)
+    print(f"{flags:x}")
+    assert (flags & ENABLE_KECCAK) == 0
+
+
+def test_keccak() -> None:
+
+    # the keccak operator is 62. The assemble() function doesn't support it
+    # (yet)
+
+    # keccak256 is available when the softfork has activated
+    keccak_prg = Program.to(
+        assemble(
+            "(softfork (q . 1134) (q . 1) (q a (i "
+            "(= "
+            '(62 (q . "foobar"))'
+            "(q . 0x38d18acb67d25c8bb9942764b62f18e17054f66a817bd4295423adf9ed98873e))"
+            "(q . 0) (q x)) (q . ())) (q . ()))"
         )
+    )
+
+    cost, ret = keccak_prg.run_with_flags(1215, ENABLE_KECCAK, [])
+    assert cost == 1215
+    assert ret.atom == b""
+
+    # keccak is ignored when the softfork has not activated
+    cost, ret = keccak_prg.run_with_flags(1215, 0, [])
+    assert cost == 1215
+    assert ret.atom == b""
+
+    # make sure keccak is actually executed, by comparing with the wrong output
+    keccak_prg = Program.to(
+        assemble(
+            "(softfork (q . 1134) (q . 1) (q a (i "
+            '(= (62 (q . "foobar")) '
+            "(q . 0x58d18acb67d25c8bb9942764b62f18e17054f66a817bd4295423adf9ed98873e))"
+            "(q . 0) (q x)) (q . ())) (q . ()))"
+        )
+    )
+    with pytest.raises(ValueError, match="clvm raise"):
+        keccak_prg.run_with_flags(1215, ENABLE_KECCAK, [])
+
+    # keccak is ignored when the softfork has not activated
+    cost, ret = keccak_prg.run_with_flags(1215, 0, [])
+    assert cost == 1215
+    assert ret.atom == b""
+
+    # === HARD FORK ===
+    # new operators *outside* the softfork guard
+    # keccak256 is available outside the guard with the appropriate flag
+    keccak_prg = Program.to(
+        assemble(
+            "(a (i (= "
+            '(62 (q . "foobar")) '
+            "(q . 0x38d18acb67d25c8bb9942764b62f18e17054f66a817bd4295423adf9ed98873e)) "
+            "(q . 0) (q x)) (q . ()))"
+        )
+    )
+
+    cost, ret = keccak_prg.run_with_flags(994, ENABLE_KECCAK | ENABLE_KECCAK_OPS_OUTSIDE_GUARD, [])
+    assert cost == 994
+    assert ret.atom == b""

@@ -48,7 +48,7 @@ if ($null -eq (Get-Command py -ErrorAction SilentlyContinue))
     Exit 1
 }
 
-$supportedPythonVersions = "3.12", "3.11", "3.10", "3.9", "3.8"
+$supportedPythonVersions = "3.12", "3.11", "3.10", "3.9"
 if ("$env:INSTALL_PYTHON_VERSION" -ne "")
 {
     $pythonVersion = $env:INSTALL_PYTHON_VERSION
@@ -104,8 +104,6 @@ foreach ($extra in $extras)
 
 ./Setup-poetry.ps1 -pythonVersion "$pythonVersion"
 .penv/Scripts/poetry env use $(py -"$pythonVersion" -c 'import sys; print(sys.executable)')
-# TODO: Decide if this is needed or should be handled automatically in some way
-.penv/Scripts/pip install "poetry-dynamic-versioning[plugin]"
 .penv/Scripts/poetry install @extras_cli
 
 if ($i)

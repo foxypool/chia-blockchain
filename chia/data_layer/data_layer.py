@@ -61,12 +61,13 @@ from chia.data_layer.data_layer_wallet import DataLayerWallet, Mirror, Singleton
 from chia.data_layer.data_store import DataStore
 from chia.data_layer.download_data import (
     delete_full_file_if_exists,
-    get_delta_filename,
-    get_full_tree_filename,
+    get_delta_filename_path,
+    get_full_tree_filename_path,
     insert_from_delta_file,
     write_files_for_root,
 )
 from chia.rpc.rpc_server import StateChangedProtocol, default_get_connections
+from chia.rpc.wallet_request_types import LogIn
 from chia.rpc.wallet_rpc_client import WalletRpcClient
 from chia.server.outbound_message import NodeType
 from chia.server.server import ChiaServer
@@ -128,6 +129,7 @@ class DataLayer:
     client_timeout: aiohttp.ClientTimeout = dataclasses.field(
         default_factory=functools.partial(aiohttp.ClientTimeout, total=45, sock_connect=5)
     )
+    group_files_by_store: bool = False
 
     @property
     def server(self) -> ChiaServer:
@@ -192,6 +194,7 @@ class DataLayer:
             client_timeout=aiohttp.ClientTimeout(
                 total=config.get("client_timeout", 45), sock_connect=config.get("connect_timeout", 5)
             ),
+            group_files_by_store=config.get("group_files_by_store", False),
         )
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,13 +243,12 @@ class DataLayer:
         self._server = server
 
     async def wallet_log_in(self, fingerprint: int) -> int:
-        result = await self.wallet_rpc.log_in(fingerprint)
-        if not result.get("success", False):
-            wallet_error = result.get("error", "no error message provided")
-            raise Exception(f"DataLayer wallet RPC log in request failed: {wallet_error}")
+        try:
+            result = await self.wallet_rpc.log_in(LogIn(uint32(fingerprint)))
+        except ValueError as e:
+            raise Exception(f"DataLayer wallet RPC log in request failed: {e.args[0]}")
 
-        fingerprint = cast(int, result["fingerprint"])
-        return fingerprint
+        return result.fingerprint
 
     async def create_store(
         self, fee: uint64, root: bytes32 = bytes32([0] * 32)
@@ -566,6 +568,7 @@ class DataLayer:
         servers_info = await self.data_store.get_available_servers_for_store(store_id, timestamp)
         # TODO: maybe append a random object to the whole DataLayer class?
         random.shuffle(servers_info)
+        success = False
         for server_info in servers_info:
             url = server_info.url
 
@@ -598,13 +601,16 @@ class DataLayer:
                     self.data_store,
                     store_id,
                     root.generation,
-                    [record.root for record in reversed(to_download)],
-                    server_info,
-                    self.server_files_location,
-                    self.client_timeout,
-                    self.log,
-                    proxy_url,
-                    await self.get_downloader(store_id, url),
+                    target_generation=singleton_record.generation,
+                    root_hashes=[record.root for record in reversed(to_download)],
+                    server_info=server_info,
+                    client_foldername=self.server_files_location,
+                    timeout=self.client_timeout,
+                    log=self.log,
+                    proxy_url=proxy_url,
+                    downloader=await self.get_downloader(store_id, url),
+                    group_files_by_store=self.group_files_by_store,
+                    maximum_full_file_count=self.maximum_full_file_count,
                 )
                 if success:
                     self.log.info(
@@ -617,6 +623,30 @@ class DataLayer:
                 self.log.warning(f"Server {url} unavailable for {store_id}.")
             except Exception as e:
                 self.log.warning(f"Exception while downloading files for {store_id}: {e} {traceback.format_exc()}.")
+
+        # if there aren't any servers then don't try to write the full tree
+        if not success and len(servers_info) > 0:
+            root = await self.data_store.get_tree_root(store_id=store_id)
+            if root.node_hash is None:
+                return
+            filename_full_tree = get_full_tree_filename_path(
+                foldername=self.server_files_location,
+                store_id=store_id,
+                node_hash=root.node_hash,
+                generation=root.generation,
+                group_by_store=self.group_files_by_store,
+            )
+            # Had trouble with this generation, so generate full file for the generation we currently have
+            if not os.path.exists(filename_full_tree):
+                with open(filename_full_tree, "wb") as writer:
+                    await self.data_store.write_tree_to_file(
+                        root=root,
+                        node_hash=root.node_hash,
+                        store_id=store_id,
+                        deltas_only=False,
+                        writer=writer,
+                    )
+                    self.log.info(f"Successfully written full tree filename {filename_full_tree}.")
 
     async def get_downloader(self, store_id: bytes32, url: str) -> Optional[PluginRemote]:
         request_json = {"store_id": store_id.hex(), "url": url}
@@ -675,6 +705,7 @@ class DataLayer:
                 root,
                 self.server_files_location,
                 full_tree_first_publish_generation,
+                group_by_store=self.group_files_by_store,
             )
             if not write_file_result.result:
                 # this particular return only happens if the files already exist, no need to log anything
@@ -684,6 +715,7 @@ class DataLayer:
                     request_json = {
                         "store_id": store_id.hex(),
                         "diff_filename": write_file_result.diff_tree.name,
+                        "group_files_by_store": self.group_files_by_store,
                     }
                     if write_file_result.full_tree is not None:
                         request_json["full_tree_filename"] = write_file_result.full_tree.name
@@ -735,6 +767,7 @@ class DataLayer:
                 server_files_location,
                 full_tree_first_publish_generation,
                 overwrite,
+                self.group_files_by_store,
             )
             files.append(res.diff_tree.name)
             if res.full_tree is not None:
@@ -742,7 +775,11 @@ class DataLayer:
 
         uploaders = await self.get_uploaders(store_id)
         if uploaders is not None and len(uploaders) > 0:
-            request_json = {"store_id": store_id.hex(), "files": json.dumps(files)}
+            request_json = {
+                "store_id": store_id.hex(),
+                "files": json.dumps(files),
+                "group_files_by_store": self.group_files_by_store,
+            }
             for uploader in uploaders:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -784,14 +821,32 @@ class DataLayer:
         subscriptions = await self.data_store.get_subscriptions()
         if store_id not in (subscription.store_id for subscription in subscriptions):
             raise RuntimeError("No subscription found for the given store_id.")
-        filenames: List[str] = []
+        paths: List[Path] = []
         if await self.data_store.store_id_exists(store_id) and not retain_data:
             generation = await self.data_store.get_tree_generation(store_id)
             all_roots = await self.data_store.get_roots_between(store_id, 1, generation + 1)
             for root in all_roots:
                 root_hash = root.node_hash if root.node_hash is not None else self.none_bytes
-                filenames.append(get_full_tree_filename(store_id, root_hash, root.generation))
-                filenames.append(get_delta_filename(store_id, root_hash, root.generation))
+                for group_by_store in (True, False):
+                    paths.append(
+                        get_full_tree_filename_path(
+                            self.server_files_location,
+                            store_id,
+                            root_hash,
+                            root.generation,
+                            group_by_store,
+                        )
+                    )
+                    paths.append(
+                        get_delta_filename_path(
+                            self.server_files_location,
+                            store_id,
+                            root_hash,
+                            root.generation,
+                            group_by_store,
+                        )
+                    )
+
         # stop tracking first, then unsubscribe from the data store
         await self.wallet_rpc.dl_stop_tracking(store_id)
         await self.data_store.unsubscribe(store_id)
@@ -799,8 +854,7 @@ class DataLayer:
             await self.data_store.delete_store_data(store_id)
 
         self.log.info(f"Unsubscribed to {store_id}")
-        for filename in filenames:
-            file_path = self.server_files_location.joinpath(filename)
+        for file_path in paths:
             try:
                 file_path.unlink()
             except FileNotFoundError:

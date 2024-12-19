@@ -14,7 +14,7 @@ from chia.server.ws_connection import WSChiaConnection
 from chia.types.blockchain_format.coin import Coin, coin_as_list
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.sized_bytes import bytes32
-from chia.types.spend_bundle import SpendBundle, estimate_fees
+from chia.types.spend_bundle import estimate_fees
 from chia.util.db_wrapper import DBWrapper2
 from chia.util.hash import std_hash
 from chia.util.ints import uint32, uint64
@@ -42,7 +42,6 @@ from chia.wallet.uncurried_puzzle import uncurry_puzzle
 from chia.wallet.util.compute_hints import compute_spend_hints_and_additions
 from chia.wallet.util.query_filter import HashFilter
 from chia.wallet.util.transaction_type import TransactionType
-from chia.wallet.util.tx_config import TXConfig
 from chia.wallet.util.wallet_types import WalletType
 from chia.wallet.vc_wallet.cr_cat_drivers import ProofsChecker, construct_pending_approval_state
 from chia.wallet.vc_wallet.vc_wallet import VCWallet
@@ -53,6 +52,7 @@ from chia.wallet.wallet_protocol import WalletProtocol
 
 if TYPE_CHECKING:
     from chia.wallet.wallet_state_manager import WalletStateManager
+from chia.wallet.wallet_spend_bundle import WalletSpendBundle
 
 OFFER_MOD = load_clvm_maybe_recompile("settlement_payments.clsp")
 
@@ -187,7 +187,7 @@ class TradeManager:
         coin_state_names: List[bytes32] = [cs.coin.name() for cs in coin_states]
         # If any of our settlement_payments were spent, this offer was a success!
         if set(our_addition_ids) == set(coin_state_names):
-            height = coin_states[0].created_height
+            height = coin_state.spent_height
             assert height is not None
             await self.trade_store.set_status(trade.trade_id, TradeStatus.CONFIRMED, index=height)
             tx_records: List[TransactionRecord] = await self.calculate_tx_records_for_offer(offer, False)
@@ -245,7 +245,6 @@ class TradeManager:
     async def cancel_pending_offers(
         self,
         trades: List[bytes32],
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         fee: uint64 = uint64(0),
         secure: bool = True,  # Cancel with a transaction on chain
@@ -303,7 +302,7 @@ class TradeManager:
                     continue
 
                 new_ph = await wallet.wallet_state_manager.main_wallet.get_puzzle_hash(
-                    new=(not tx_config.reuse_puzhash)
+                    new=(not action_scope.config.tx_config.reuse_puzhash)
                 )
 
                 if len(trade_records) > 1 or len(cancellation_coins) > 1:
@@ -313,26 +312,28 @@ class TradeManager:
                     )
                 else:
                     announcement_conditions = tuple()
+                async with action_scope.use() as interface:
+                    interface.side_effects.selected_coins.append(coin)
                 # This should probably not switch on whether or not we're spending a XCH but it has to for now
                 if wallet.type() == WalletType.STANDARD_WALLET:
                     assert isinstance(wallet, Wallet)
                     if fee_to_pay > coin.amount:
                         selected_coins: Set[Coin] = await wallet.select_coins(
                             uint64(fee_to_pay - coin.amount),
-                            tx_config.coin_selection_config.override(
-                                excluded_coin_ids=[*tx_config.coin_selection_config.excluded_coin_ids, coin.name()],
-                            ),
+                            action_scope,
                         )
                         selected_coins.add(coin)
                     else:
                         selected_coins = {coin}
-                    async with self.wallet_state_manager.new_action_scope(push=False) as inner_action_scope:
+                    async with self.wallet_state_manager.new_action_scope(
+                        action_scope.config.tx_config.override(
+                            excluded_coin_ids=[],
+                        ),
+                        push=False,
+                    ) as inner_action_scope:
                         await wallet.generate_signed_transaction(
                             uint64(sum(c.amount for c in selected_coins) - fee_to_pay),
                             new_ph,
-                            tx_config.override(
-                                excluded_coin_ids=[],
-                            ),
                             inner_action_scope,
                             origin_id=coin.name(),
                             fee=fee_to_pay,
@@ -342,13 +343,15 @@ class TradeManager:
                 else:
                     # ATTENTION: new_wallets
                     assert isinstance(wallet, (CATWallet, DataLayerWallet, NFTWallet))
-                    async with self.wallet_state_manager.new_action_scope(push=False) as inner_action_scope:
+                    async with self.wallet_state_manager.new_action_scope(
+                        action_scope.config.tx_config.override(
+                            excluded_coin_ids=[],
+                        ),
+                        push=False,
+                    ) as inner_action_scope:
                         await wallet.generate_signed_transaction(
                             [coin.amount],
                             [new_ph],
-                            tx_config.override(
-                                excluded_coin_ids=[],
-                            ),
                             inner_action_scope,
                             fee=fee_to_pay,
                             coins={coin},
@@ -376,7 +379,7 @@ class TradeManager:
                     confirmed=False,
                     sent=uint32(10),
                     spend_bundle=None,
-                    additions=cancellation_additions,
+                    additions=[],
                     removals=[coin],
                     wallet_id=wallet.id(),
                     sent_to=[],
@@ -397,7 +400,7 @@ class TradeManager:
                 interface.side_effects.transactions = [
                     tx for tx in interface.side_effects.transactions if tx.name not in all_tx_names
                 ]
-                final_spend_bundle = SpendBundle.aggregate(
+                final_spend_bundle = WalletSpendBundle.aggregate(
                     [tx.spend_bundle for tx in all_txs if tx.spend_bundle is not None]
                 )
                 interface.side_effects.transactions.append(
@@ -424,7 +427,6 @@ class TradeManager:
     async def create_offer_for_ids(
         self,
         offer: Dict[Union[int, bytes32], int],
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         driver_dict: Optional[Dict[bytes32, PuzzleInfo]] = None,
         solver: Optional[Solver] = None,
@@ -439,7 +441,6 @@ class TradeManager:
             solver = Solver({})
         result = await self._create_offer_for_ids(
             offer,
-            tx_config,
             action_scope,
             driver_dict,
             solver,
@@ -476,7 +477,6 @@ class TradeManager:
     async def _create_offer_for_ids(
         self,
         offer_dict: Dict[Union[int, bytes32], int],
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         driver_dict: Optional[Dict[bytes32, PuzzleInfo]] = None,
         solver: Optional[Solver] = None,
@@ -506,7 +506,9 @@ class TradeManager:
                         wallet_id = uint32(id)
                         wallet = self.wallet_state_manager.wallets.get(wallet_id)
                         assert isinstance(wallet, (CATWallet, Wallet))
-                        p2_ph: bytes32 = await wallet.get_puzzle_hash(new=not tx_config.reuse_puzhash)
+                        p2_ph: bytes32 = await wallet.get_puzzle_hash(
+                            new=not action_scope.config.tx_config.reuse_puzhash
+                        )
                         if wallet.type() != WalletType.STANDARD_WALLET:
                             if callable(getattr(wallet, "get_asset_id", None)):  # ATTENTION: new wallets
                                 assert isinstance(wallet, CATWallet)
@@ -518,7 +520,7 @@ class TradeManager:
                                 )
                     else:
                         p2_ph = await self.wallet_state_manager.main_wallet.get_puzzle_hash(
-                            new=not tx_config.reuse_puzhash
+                            new=not action_scope.config.tx_config.reuse_puzhash
                         )
                         asset_id = id
                         wallet = await self.wallet_state_manager.get_wallet_for_asset_id(asset_id.hex())
@@ -558,7 +560,7 @@ class TradeManager:
                         coins_to_offer[id] = await wallet.get_coins_to_offer(
                             asset_id=asset_id,
                             amount=uint64(amount_to_select),
-                            coin_selection_config=tx_config.coin_selection_config,
+                            action_scope=action_scope,
                         )
                     # Note: if we use check_for_special_offer_making, this is not used.
                 elif amount == 0:
@@ -590,7 +592,6 @@ class TradeManager:
             potential_special_offer: Optional[Offer] = await self.check_for_special_offer_making(
                 offer_dict_no_ints,
                 driver_dict,
-                tx_config,
                 action_scope,
                 solver,
                 fee,
@@ -616,7 +617,9 @@ class TradeManager:
                     wallet = self.wallet_state_manager.wallets.get(uint32(id))
                 else:
                     wallet = await self.wallet_state_manager.get_wallet_for_asset_id(id.hex())
-                async with self.wallet_state_manager.new_action_scope(push=False) as inner_action_scope:
+                async with self.wallet_state_manager.new_action_scope(
+                    action_scope.config.tx_config, push=False
+                ) as inner_action_scope:
                     # This should probably not switch on whether or not we're spending XCH but it has to for now
                     assert wallet is not None
                     if wallet.type() == WalletType.STANDARD_WALLET:
@@ -624,7 +627,6 @@ class TradeManager:
                         await wallet.generate_signed_transaction(
                             uint64(abs(offer_dict[id])),
                             Offer.ph(),
-                            tx_config,
                             inner_action_scope,
                             fee=fee_left_to_pay,
                             coins=selected_coins,
@@ -639,7 +641,6 @@ class TradeManager:
                             # [abs(offer_dict[id])],
                             amounts,
                             [Offer.ph()],
-                            tx_config,
                             inner_action_scope,
                             fee=fee_left_to_pay,
                             coins=selected_coins,
@@ -651,7 +652,6 @@ class TradeManager:
                         await wallet.generate_signed_transaction(
                             [uint64(abs(offer_dict[id]))],
                             [Offer.ph()],
-                            tx_config,
                             inner_action_scope,
                             fee=fee_left_to_pay,
                             coins=selected_coins,
@@ -667,7 +667,7 @@ class TradeManager:
             async with action_scope.use() as interface:
                 interface.side_effects.transactions.extend(all_transactions)
 
-            total_spend_bundle = SpendBundle.aggregate(
+            total_spend_bundle = WalletSpendBundle.aggregate(
                 [x.spend_bundle for x in all_transactions if x.spend_bundle is not None]
             )
 
@@ -702,7 +702,7 @@ class TradeManager:
 
     async def calculate_tx_records_for_offer(self, offer: Offer, validate: bool) -> List[TransactionRecord]:
         if validate:
-            final_spend_bundle: SpendBundle = offer.to_valid_spend()
+            final_spend_bundle: WalletSpendBundle = offer.to_valid_spend()
             hint_dict: Dict[bytes32, bytes32] = {}
             additions_dict: Dict[bytes32, Coin] = {}
             for hinted_coins, _ in (
@@ -832,7 +832,6 @@ class TradeManager:
         self,
         offer: Offer,
         peer: WSChiaConnection,
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         solver: Optional[Solver] = None,
         fee: uint64 = uint64(0),
@@ -864,10 +863,11 @@ class TradeManager:
         if not valid:
             raise ValueError("This offer is no longer valid")
         # We need to sandbox the transactions here because we're going to make our own
-        async with self.wallet_state_manager.new_action_scope(push=False) as inner_action_scope:
+        async with self.wallet_state_manager.new_action_scope(
+            action_scope.config.tx_config, push=False
+        ) as inner_action_scope:
             result = await self._create_offer_for_ids(
                 take_offer_dict,
-                tx_config,
                 inner_action_scope,
                 offer.driver_dict,
                 solver,
@@ -881,11 +881,11 @@ class TradeManager:
             success, take_offer, error = result
 
             complete_offer, valid_spend_solver = await self.check_for_final_modifications(
-                Offer.aggregate([offer, take_offer]), solver, tx_config, inner_action_scope
+                Offer.aggregate([offer, take_offer]), solver, inner_action_scope
             )
         self.log.info("COMPLETE OFFER: %s", complete_offer.to_bech32())
         assert complete_offer.is_valid()
-        final_spend_bundle: SpendBundle = complete_offer.to_valid_spend(
+        final_spend_bundle: WalletSpendBundle = complete_offer.to_valid_spend(
             solver=Solver({**valid_spend_solver.info, **solver.info})
         )
         await self.maybe_create_wallets_for_offer(complete_offer)
@@ -909,29 +909,9 @@ class TradeManager:
 
         await self.save_trade(trade_record, offer)
 
-        # Dummy transaction for the sake of the wallet push
-        push_tx = TransactionRecord(
-            confirmed_at_height=uint32(0),
-            created_at_time=uint64(int(time.time())),
-            to_puzzle_hash=bytes32([1] * 32),
-            amount=uint64(0),
-            fee_amount=uint64(0),
-            confirmed=False,
-            sent=uint32(0),
-            spend_bundle=final_spend_bundle,
-            additions=final_spend_bundle.additions(),
-            removals=final_spend_bundle.removals(),
-            wallet_id=uint32(0),
-            sent_to=[],
-            trade_id=bytes32([1] * 32),
-            type=uint32(TransactionType.OUTGOING_TRADE.value),
-            name=final_spend_bundle.name(),
-            memos=[],
-            valid_times=ConditionValidTimes(),
-        )
-
         async with action_scope.use() as interface:
-            interface.side_effects.transactions.extend([push_tx, *tx_records])
+            interface.side_effects.transactions.extend(tx_records)
+            interface.side_effects.extra_spends.append(final_spend_bundle)
 
         return trade_record
 
@@ -939,7 +919,6 @@ class TradeManager:
         self,
         offer_dict: Dict[Optional[bytes32], int],
         driver_dict: Dict[bytes32, PuzzleInfo],
-        tx_config: TXConfig,
         action_scope: WalletActionScope,
         solver: Solver,
         fee: uint64 = uint64(0),
@@ -953,7 +932,7 @@ class TradeManager:
                 == AssetType.ROYALTY_TRANSFER_PROGRAM.value
             ):
                 return await NFTWallet.make_nft1_offer(
-                    self.wallet_state_manager, offer_dict, driver_dict, tx_config, action_scope, fee, extra_conditions
+                    self.wallet_state_manager, offer_dict, driver_dict, action_scope, fee, extra_conditions
                 )
             elif (
                 puzzle_info.check_type(
@@ -969,7 +948,6 @@ class TradeManager:
                     offer_dict,
                     driver_dict,
                     solver,
-                    tx_config,
                     action_scope,
                     fee,
                     extra_conditions,
@@ -1031,7 +1009,7 @@ class TradeManager:
         }
 
     async def check_for_final_modifications(
-        self, offer: Offer, solver: Solver, tx_config: TXConfig, action_scope: WalletActionScope
+        self, offer: Offer, solver: Solver, action_scope: WalletActionScope
     ) -> Tuple[Offer, Solver]:
         for puzzle_info in offer.driver_dict.values():
             if (
@@ -1054,7 +1032,7 @@ class TradeManager:
                 for _, wallet in self.wallet_state_manager.wallets.items():
                     if WalletType(wallet.type()) == WalletType.VC:
                         assert isinstance(wallet, VCWallet)
-                        return await wallet.add_vc_authorization(offer, solver, tx_config, action_scope)
+                        return await wallet.add_vc_authorization(offer, solver, action_scope)
                 else:
                     raise ValueError("No VCs to approve CR-CATs with")  # pragma: no cover
 
