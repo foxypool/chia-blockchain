@@ -5,7 +5,7 @@ import logging
 import random
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, cast
+from typing import Optional, cast
 
 import pytest
 
@@ -15,7 +15,8 @@ from clvm.casts import int_to_bytes
 
 from chia._tests.blockchain.blockchain_test_utils import _validate_and_add_block
 from chia._tests.util.db_connection import DBConnection, PathDBConnection
-from chia.consensus.blockchain import Blockchain
+from chia.consensus.block_body_validation import ForkInfo
+from chia.consensus.blockchain import AddBlockResult, Blockchain
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.consensus.full_block_to_block_record import header_block_to_sub_block_record
 from chia.full_node.block_store import BlockStore
@@ -29,6 +30,7 @@ from chia.types.full_block import FullBlock
 from chia.util.db_wrapper import get_host_parameter_limit
 from chia.util.full_block_utils import GeneratorBlockInfo
 from chia.util.ints import uint8, uint32, uint64
+from chia.util.task_referencer import create_referenced_task
 
 log = logging.getLogger(__name__)
 
@@ -58,9 +60,7 @@ async def test_block_store(tmp_dir: Path, db_version: int, bt: BlockTools, use_c
         time_per_block=10,
     )
     wt: WalletTool = bt.get_pool_wallet_tool()
-    tx = wt.generate_signed_transaction(
-        uint64(10), wt.get_new_puzzlehash(), list(blocks[-1].get_included_reward_coins())[0]
-    )
+    tx = wt.generate_signed_transaction(uint64(10), wt.get_new_puzzlehash(), blocks[-1].get_included_reward_coins()[0])
     blocks = bt.get_consecutive_blocks(
         10,
         block_list_input=blocks,
@@ -137,6 +137,90 @@ async def test_block_store(tmp_dir: Path, db_version: int, bt: BlockTools, use_c
 
 @pytest.mark.limit_consensus_modes(reason="save time")
 @pytest.mark.anyio
+async def test_get_full_blocks_at(
+    tmp_dir: Path, db_version: int, bt: BlockTools, use_cache: bool, default_400_blocks: list[FullBlock]
+) -> None:
+    blocks = bt.get_consecutive_blocks(10)
+    alt_blocks = default_400_blocks[:10]
+
+    async with DBConnection(2) as db_wrapper:
+        # Use a different file for the blockchain
+        coin_store = await CoinStore.create(db_wrapper)
+        block_store = await BlockStore.create(db_wrapper, use_cache=use_cache)
+        bc = await Blockchain.create(coin_store, block_store, bt.constants, tmp_dir, 2)
+
+        count = 0
+        fork_info = ForkInfo(-1, -1, bt.constants.GENESIS_CHALLENGE)
+        for b1, b2 in zip(blocks, alt_blocks):
+            await _validate_and_add_block(bc, b1)
+            await _validate_and_add_block(bc, b2, expected_result=AddBlockResult.ADDED_AS_ORPHAN, fork_info=fork_info)
+            ret = await block_store.get_full_blocks_at([uint32(count)])
+            assert set(ret) == set([b1, b2])
+            count += 1
+            ret = await block_store.get_full_blocks_at([uint32(c) for c in range(count)])
+            assert len(ret) == count * 2
+            assert set(ret) == set(blocks[:count] + alt_blocks[:count])
+
+
+@pytest.mark.limit_consensus_modes(reason="save time")
+@pytest.mark.anyio
+async def test_get_block_records_in_range(
+    bt: BlockTools, tmp_dir: Path, use_cache: bool, default_400_blocks: list[FullBlock]
+) -> None:
+    blocks = bt.get_consecutive_blocks(10)
+    alt_blocks = default_400_blocks[:10]
+
+    async with DBConnection(2) as db_wrapper:
+        # Use a different file for the blockchain
+        coin_store = await CoinStore.create(db_wrapper)
+        block_store = await BlockStore.create(db_wrapper, use_cache=use_cache)
+        bc = await Blockchain.create(coin_store, block_store, bt.constants, tmp_dir, 2)
+
+        count = 0
+        fork_info = ForkInfo(-1, -1, bt.constants.GENESIS_CHALLENGE)
+        for b1, b2 in zip(blocks, alt_blocks):
+            await _validate_and_add_block(bc, b1)
+            await _validate_and_add_block(bc, b2, expected_result=AddBlockResult.ADDED_AS_ORPHAN, fork_info=fork_info)
+            # the range is inclusive
+            ret = await block_store.get_block_records_in_range(count, count)
+            assert len(ret) == 1
+            assert b1.header_hash in ret
+            ret = await block_store.get_block_records_in_range(0, count)
+            count += 1
+            assert len(ret) == count
+            assert list(ret.keys()) == [b.header_hash for b in blocks[:count]]
+
+
+@pytest.mark.limit_consensus_modes(reason="save time")
+@pytest.mark.anyio
+async def test_get_block_bytes_in_range_in_main_chain(
+    bt: BlockTools, tmp_dir: Path, use_cache: bool, default_400_blocks: list[FullBlock]
+) -> None:
+    blocks = bt.get_consecutive_blocks(10)
+    alt_blocks = default_400_blocks[:10]
+
+    async with DBConnection(2) as db_wrapper:
+        # Use a different file for the blockchain
+        coin_store = await CoinStore.create(db_wrapper)
+        block_store = await BlockStore.create(db_wrapper, use_cache=use_cache)
+        bc = await Blockchain.create(coin_store, block_store, bt.constants, tmp_dir, 2)
+
+        count = 0
+        fork_info = ForkInfo(-1, -1, bt.constants.GENESIS_CHALLENGE)
+        for b1, b2 in zip(blocks, alt_blocks):
+            await _validate_and_add_block(bc, b1)
+            await _validate_and_add_block(bc, b2, expected_result=AddBlockResult.ADDED_AS_ORPHAN, fork_info=fork_info)
+            # the range is inclusive
+            ret = await block_store.get_block_bytes_in_range(count, count)
+            assert ret == [bytes(b1)]
+            ret = await block_store.get_block_bytes_in_range(0, count)
+            count += 1
+            assert len(ret) == count
+            assert set(ret) == set([bytes(b) for b in blocks[:count]])
+
+
+@pytest.mark.limit_consensus_modes(reason="save time")
+@pytest.mark.anyio
 async def test_deadlock(tmp_dir: Path, db_version: int, bt: BlockTools, use_cache: bool) -> None:
     """
     This test was added because the store was deadlocking in certain situations, when fetching and
@@ -153,25 +237,26 @@ async def test_deadlock(tmp_dir: Path, db_version: int, bt: BlockTools, use_cach
         for block in blocks:
             await _validate_and_add_block(bc, block)
             block_records.append(bc.block_record(block.header_hash))
-        tasks: List[asyncio.Task[object]] = []
+        tasks: list[asyncio.Task[object]] = []
 
         for i in range(10000):
             rand_i = random.randint(0, 9)
             if random.random() < 0.5:
                 tasks.append(
-                    asyncio.create_task(
+                    create_referenced_task(
                         store.add_full_block(blocks[rand_i].header_hash, blocks[rand_i], block_records[rand_i])
                     )
                 )
             if random.random() < 0.5:
-                tasks.append(asyncio.create_task(store.get_full_block(blocks[rand_i].header_hash)))
+                tasks.append(create_referenced_task(store.get_full_block(blocks[rand_i].header_hash)))
         await asyncio.gather(*tasks)
 
 
 @pytest.mark.limit_consensus_modes(reason="save time")
 @pytest.mark.anyio
-async def test_rollback(bt: BlockTools, tmp_dir: Path, use_cache: bool) -> None:
+async def test_rollback(bt: BlockTools, tmp_dir: Path, use_cache: bool, default_400_blocks: list[FullBlock]) -> None:
     blocks = bt.get_consecutive_blocks(10)
+    alt_blocks = default_400_blocks[:10]
 
     async with DBConnection(2) as db_wrapper:
         # Use a different file for the blockchain
@@ -181,8 +266,10 @@ async def test_rollback(bt: BlockTools, tmp_dir: Path, use_cache: bool) -> None:
 
         # insert all blocks
         count = 0
-        for block in blocks:
-            await _validate_and_add_block(bc, block)
+        fork_info = ForkInfo(-1, -1, bt.constants.GENESIS_CHALLENGE)
+        for b1, b2 in zip(blocks, alt_blocks):
+            await _validate_and_add_block(bc, b1)
+            await _validate_and_add_block(bc, b2, expected_result=AddBlockResult.ADDED_AS_ORPHAN, fork_info=fork_info)
             count += 1
             ret = await block_store.get_random_not_compactified(count)
             assert len(ret) == count
@@ -197,6 +284,13 @@ async def test_rollback(bt: BlockTools, tmp_dir: Path, use_cache: bool) -> None:
                     rows = list(await cursor.fetchall())
                     assert len(rows) == 1
                     assert rows[0][0]
+            for block in alt_blocks:
+                async with conn.execute(
+                    "SELECT in_main_chain FROM full_blocks WHERE header_hash=?", (block.header_hash,)
+                ) as cursor:
+                    rows = list(await cursor.fetchall())
+                    assert len(rows) == 1
+                    assert not rows[0][0]
 
         await block_store.rollback(5)
 
@@ -212,6 +306,14 @@ async def test_rollback(bt: BlockTools, tmp_dir: Path, use_cache: bool) -> None:
                     assert len(rows) == 1
                     assert rows[0][0] == (count <= 5)
                 count += 1
+            for block in alt_blocks:
+                async with conn.execute(
+                    "SELECT in_main_chain FROM full_blocks WHERE header_hash=? ORDER BY height",
+                    (block.header_hash,),
+                ) as cursor:
+                    rows = list(await cursor.fetchall())
+                    assert len(rows) == 1
+                    assert not rows[0][0]
 
 
 @pytest.mark.limit_consensus_modes(reason="save time")

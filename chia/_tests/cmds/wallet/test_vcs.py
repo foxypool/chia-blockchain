@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
 
 from chia_rs import Coin
 
 from chia._tests.cmds.cmd_test_utils import TestRpcClients, TestWalletRpcClient, logType, run_cli_command_and_assert
 from chia._tests.cmds.wallet.test_consts import FINGERPRINT_ARG, STD_TX, STD_UTX, get_bytes32
-from chia.rpc.wallet_request_types import VCMintResponse, VCRevokeResponse, VCSpendResponse
+from chia.rpc.wallet_request_types import (
+    VCAddProofs,
+    VCGet,
+    VCGetList,
+    VCGetListResponse,
+    VCGetProofsForRoot,
+    VCGetProofsForRootResponse,
+    VCGetResponse,
+    VCMint,
+    VCMintResponse,
+    VCProofsRPC,
+    VCProofWithHash,
+    VCRecordWithCoinID,
+    VCRevoke,
+    VCRevokeResponse,
+    VCSpend,
+    VCSpendResponse,
+)
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.util.bech32m import encode_puzzle_hash
 from chia.util.ints import uint32, uint64
@@ -22,21 +38,20 @@ test_condition_valid_times: ConditionValidTimes = ConditionValidTimes(min_time=u
 # VC Commands
 
 
-def test_vcs_mint(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_mint(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
     class VcsMintRpcClient(TestWalletRpcClient):
         async def vc_mint(
             self,
-            did_id: bytes32,
+            request: VCMint,
             tx_config: TXConfig,
-            target_address: Optional[bytes32] = None,
-            fee: uint64 = uint64(0),
-            push: bool = True,
             timelock_info: ConditionValidTimes = ConditionValidTimes(),
         ) -> VCMintResponse:
-            self.add_to_log("vc_mint", (did_id, tx_config, target_address, fee, push, timelock_info))
+            self.add_to_log(
+                "vc_mint", (request.did_id, tx_config, request.target_address, request.fee, request.push, timelock_info)
+            )
 
             return VCMintResponse(
                 [STD_UTX],
@@ -47,7 +62,7 @@ def test_vcs_mint(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Pa
                         LineageProof(None, None, None),
                         VCLineageProof(None, None, None, None),
                         bytes32([3] * 32),
-                        bytes32([0] * 32),
+                        bytes32.zeros,
                         bytes32([1] * 32),
                         None,
                     ),
@@ -55,7 +70,7 @@ def test_vcs_mint(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Pa
                 ),
             )
 
-    inst_rpc_client = VcsMintRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsMintRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     did_bytes = get_bytes32(1)
     did_id = encode_puzzle_hash(did_bytes, "did:chia:")
@@ -81,70 +96,77 @@ def test_vcs_mint(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Pa
     ]
     run_cli_command_and_assert(capsys, root_dir, command_args, assert_list)
     expected_calls: logType = {
-        "vc_mint": [(did_bytes, DEFAULT_TX_CONFIG, target_bytes, 500000000000, True, test_condition_valid_times)]
+        "vc_mint": [(did_id, DEFAULT_TX_CONFIG, target_addr, 500000000000, True, test_condition_valid_times)]
     }
     test_rpc_clients.wallet_rpc_client.check_log(expected_calls)
 
 
-def test_vcs_get(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_get(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
     class VcsGetRpcClient(TestWalletRpcClient):
-        async def vc_get_list(self, start: int = 0, count: int = 50) -> Tuple[List[VCRecord], Dict[str, Any]]:
-            class FakeVC:
-                def __init__(self) -> None:
-                    self.launcher_id = get_bytes32(3)
-                    self.coin = Coin(get_bytes32(1), get_bytes32(2), uint64(12345678))
-                    self.inner_puzzle_hash = get_bytes32(3)
-                    self.proof_hash = get_bytes32(4)
+        async def vc_get_list(self, request: VCGetList) -> VCGetListResponse:
+            self.add_to_log("vc_get_list", (request.start, request.end))
+            proofs = [VCProofWithHash(get_bytes32(1), VCProofsRPC([("proof here", "")]))]
+            records = [
+                VCRecordWithCoinID(
+                    VerifiedCredential(
+                        STD_TX.removals[0],
+                        LineageProof(None, None, None),
+                        VCLineageProof(None, None, None, None),
+                        bytes32([3] * 32),
+                        bytes32.zeros,
+                        bytes32([1] * 32),
+                        None,
+                    ),
+                    uint32(0),
+                    bytes32.zeros,
+                )
+            ]
+            return VCGetListResponse(records, proofs)
 
-                def __getattr__(self, item: str) -> Any:
-                    if item == "vc":
-                        return self
-
-            self.add_to_log("vc_get_list", (start, count))
-            proofs = {get_bytes32(1).hex(): ["proof here"]}
-            records = [cast(VCRecord, FakeVC())]
-            return records, proofs
-
-    inst_rpc_client = VcsGetRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsGetRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     command_args = ["wallet", "vcs", "get", FINGERPRINT_ARG, "-s10", "-c10"]
     # these are various things that should be in the output
     assert_list = [
         f"Proofs:\n- {get_bytes32(1).hex()}\n  - proof here",
         f"Launcher ID: {get_bytes32(3).hex()}",
-        f"Inner Address: {encode_puzzle_hash(get_bytes32(3), 'xch')}",
+        f"Inner Address: {encode_puzzle_hash(bytes32.zeros, 'xch')}",
     ]
     run_cli_command_and_assert(capsys, root_dir, command_args, assert_list)
     expected_calls: logType = {"vc_get_list": [(10, 10)]}
     test_rpc_clients.wallet_rpc_client.check_log(expected_calls)
 
 
-def test_vcs_update_proofs(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_update_proofs(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
     class VcsUpdateProofsRpcClient(TestWalletRpcClient):
         async def vc_spend(
             self,
-            vc_id: bytes32,
+            request: VCSpend,
             tx_config: TXConfig,
-            new_puzhash: Optional[bytes32] = None,
-            new_proof_hash: Optional[bytes32] = None,
-            provider_inner_puzhash: Optional[bytes32] = None,
-            fee: uint64 = uint64(0),
-            push: bool = True,
             timelock_info: ConditionValidTimes = ConditionValidTimes(),
         ) -> VCSpendResponse:
             self.add_to_log(
                 "vc_spend",
-                (vc_id, tx_config, new_puzhash, new_proof_hash, provider_inner_puzhash, fee, push, timelock_info),
+                (
+                    request.vc_id,
+                    tx_config,
+                    request.new_puzhash,
+                    request.new_proof_hash,
+                    request.provider_inner_puzhash,
+                    request.fee,
+                    request.push,
+                    timelock_info,
+                ),
             )
             return VCSpendResponse([STD_UTX], [STD_TX])
 
-    inst_rpc_client = VcsUpdateProofsRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsUpdateProofsRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     vc_bytes = get_bytes32(1)
     target_ph = get_bytes32(2)
@@ -187,16 +209,15 @@ def test_vcs_update_proofs(capsys: object, get_test_cli_clients: Tuple[TestRpcCl
     test_rpc_clients.wallet_rpc_client.check_log(expected_calls)
 
 
-def test_vcs_add_proof_reveal(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_add_proof_reveal(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
     class VcsAddProofRevealRpcClient(TestWalletRpcClient):
-        async def vc_add_proofs(self, proofs: Dict[str, Any]) -> None:
-            self.add_to_log("vc_add_proofs", (proofs,))
-            return None
+        async def vc_add_proofs(self, request: VCAddProofs) -> None:
+            self.add_to_log("vc_add_proofs", (request.to_json_dict()["proofs"],))
 
-    inst_rpc_client = VcsAddProofRevealRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsAddProofRevealRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     new_proof = "test_proof"
     command_args = ["wallet", "vcs", "add_proof_reveal", FINGERPRINT_ARG, f"-p{new_proof}"]
@@ -205,22 +226,22 @@ def test_vcs_add_proof_reveal(capsys: object, get_test_cli_clients: Tuple[TestRp
     run_cli_command_and_assert(capsys, root_dir, command_args, assert_list)
 
     root_assert_list = ["Proof Hash: 5fdf0dfd1fddc56c0f9f68fdb31390721625321ce79f5606b3d2c6ddebbf2a79"]
-    run_cli_command_and_assert(capsys, root_dir, command_args + ["-r"], root_assert_list)
+    run_cli_command_and_assert(capsys, root_dir, [*command_args, "-r"], root_assert_list)
 
     expected_calls: logType = {"vc_add_proofs": [({new_proof: "1"},)]}
     test_rpc_clients.wallet_rpc_client.check_log(expected_calls)
 
 
-def test_vcs_get_proofs_for_root(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_get_proofs_for_root(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
     class VcsGetProofsForRootRpcClient(TestWalletRpcClient):
-        async def vc_get_proofs_for_root(self, root: bytes32) -> Dict[str, Any]:
-            self.add_to_log("vc_get_proofs_for_root", (root,))
-            return {"test_proof": "1", "test_proof2": "1"}
+        async def vc_get_proofs_for_root(self, request: VCGetProofsForRoot) -> VCGetProofsForRootResponse:
+            self.add_to_log("vc_get_proofs_for_root", (request.root,))
+            return VCGetProofsForRootResponse([("test_proof", "1"), ("test_proof2", "1")])
 
-    inst_rpc_client = VcsGetProofsForRootRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsGetProofsForRootRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     proof_hash = get_bytes32(1)
     command_args = ["wallet", "vcs", "get_proofs_for_root", FINGERPRINT_ARG, f"-r{proof_hash.hex()}"]
@@ -232,36 +253,39 @@ def test_vcs_get_proofs_for_root(capsys: object, get_test_cli_clients: Tuple[Tes
     test_rpc_clients.wallet_rpc_client.check_log(expected_calls)
 
 
-def test_vcs_revoke(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_revoke(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
     class VcsRevokeRpcClient(TestWalletRpcClient):
-        async def vc_get(self, vc_id: bytes32) -> Optional[VCRecord]:
-            self.add_to_log("vc_get", (vc_id,))
+        async def vc_get(self, request: VCGet) -> VCGetResponse:
+            self.add_to_log("vc_get", (request.vc_id,))
 
-            class FakeVC:
-                def __init__(self) -> None:
-                    self.coin = Coin(get_bytes32(1), get_bytes32(2), uint64(12345678))
-
-                def __getattr__(self, item: str) -> Any:
-                    if item == "vc":
-                        return self
-
-            return cast(VCRecord, FakeVC())
+            return VCGetResponse(
+                VCRecord(
+                    VerifiedCredential(
+                        Coin(get_bytes32(1), get_bytes32(2), uint64(12345678)),
+                        LineageProof(),
+                        VCLineageProof(),
+                        bytes32.zeros,
+                        bytes32.zeros,
+                        bytes32.zeros,
+                        None,
+                    ),
+                    uint32(0),
+                )
+            )
 
         async def vc_revoke(
             self,
-            vc_parent_id: bytes32,
+            request: VCRevoke,
             tx_config: TXConfig,
-            fee: uint64 = uint64(0),
-            push: bool = True,
             timelock_info: ConditionValidTimes = ConditionValidTimes(),
         ) -> VCRevokeResponse:
-            self.add_to_log("vc_revoke", (vc_parent_id, tx_config, fee, push, timelock_info))
+            self.add_to_log("vc_revoke", (request.vc_parent_id, tx_config, request.fee, request.push, timelock_info))
             return VCRevokeResponse([STD_UTX], [STD_TX])
 
-    inst_rpc_client = VcsRevokeRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsRevokeRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     parent_id = get_bytes32(1)
     vc_id = get_bytes32(2)
@@ -279,8 +303,8 @@ def test_vcs_revoke(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, 
     ]
     # these are various things that should be in the output
     assert_list = ["VC successfully revoked!", f"Transaction {get_bytes32(2).hex()}"]
-    run_cli_command_and_assert(capsys, root_dir, command_args + [f"-p{parent_id.hex()}"], assert_list)
-    run_cli_command_and_assert(capsys, root_dir, command_args + [f"-l{vc_id.hex()}"], assert_list)
+    run_cli_command_and_assert(capsys, root_dir, [*command_args, f"-p{parent_id.hex()}"], assert_list)
+    run_cli_command_and_assert(capsys, root_dir, [*command_args, f"-l{vc_id.hex()}"], assert_list)
     expected_calls: logType = {
         "vc_get": [(vc_id,)],
         "vc_revoke": [
@@ -303,7 +327,7 @@ def test_vcs_revoke(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, 
     test_rpc_clients.wallet_rpc_client.check_log(expected_calls)
 
 
-def test_vcs_approve_r_cats(capsys: object, get_test_cli_clients: Tuple[TestRpcClients, Path]) -> None:
+def test_vcs_approve_r_cats(capsys: object, get_test_cli_clients: tuple[TestRpcClients, Path]) -> None:
     test_rpc_clients, root_dir = get_test_cli_clients
 
     # set RPC Client
@@ -316,7 +340,7 @@ def test_vcs_approve_r_cats(capsys: object, get_test_cli_clients: Tuple[TestRpcC
             fee: uint64 = uint64(0),
             push: bool = True,
             timelock_info: ConditionValidTimes = ConditionValidTimes(),
-        ) -> List[TransactionRecord]:
+        ) -> list[TransactionRecord]:
             self.add_to_log(
                 "crcat_approve_pending",
                 (
@@ -330,7 +354,7 @@ def test_vcs_approve_r_cats(capsys: object, get_test_cli_clients: Tuple[TestRpcC
             )
             return [STD_TX]
 
-    inst_rpc_client = VcsApproveRCATSRpcClient()  # pylint: disable=no-value-for-parameter
+    inst_rpc_client = VcsApproveRCATSRpcClient()
     test_rpc_clients.wallet_rpc_client = inst_rpc_client
     wallet_id = uint32(2)
     command_args = [

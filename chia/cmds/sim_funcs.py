@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path, PureWindowsPath
 from random import randint
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from aiohttp import ClientConnectorError
 from chia_rs import PrivateKey
@@ -47,7 +47,7 @@ def create_chia_directory(
     plot_directory: Optional[str],
     auto_farm: Optional[bool],
     docker_mode: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     This function creates a new chia directory and returns a heavily modified config,
     suitable for use in the simulator.
@@ -57,7 +57,7 @@ def create_chia_directory(
     if not chia_root.is_dir() or not Path(chia_root / "config" / "config.yaml").exists():
         # create chia directories & load config
         chia_init(chia_root, testnet=True, fix_ssl_permissions=True)
-        config: Dict[str, Any] = load_config(chia_root, "config.yaml")
+        config: dict[str, Any] = load_config(chia_root, "config.yaml")
         # apply standard block-tools config.
         config["full_node"]["send_uncompact_interval"] = 0
         config["full_node"]["target_uncompact_proofs"] = 30
@@ -243,7 +243,7 @@ def select_fingerprint(
     return fingerprint
 
 
-async def generate_plots(config: Dict[str, Any], root_path: Path, fingerprint: int, bitfield: bool) -> None:
+async def generate_plots(config: dict[str, Any], root_path: Path, fingerprint: int, bitfield: bool) -> None:
     """
     Pre-Generate plots for the new simulator instance.
     """
@@ -345,14 +345,14 @@ def print_coin_record(
 
 
 async def print_coin_records(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     node_client: SimulatorFullNodeRpcClient,
     include_reward_coins: bool,
     include_spent: bool = False,
 ) -> None:
     import sys
 
-    coin_records: List[CoinRecord] = await node_client.get_all_coins(include_spent)
+    coin_records: list[CoinRecord] = await node_client.get_all_coins(include_spent)
     coin_records = [coin_record for coin_record in coin_records if not coin_record.coinbase or include_reward_coins]
     address_prefix = config["network_overrides"]["config"][config["selected_network"]]["address_prefix"]
     name = "mojo"
@@ -382,7 +382,7 @@ async def print_coin_records(
                         break
 
 
-async def print_wallets(config: Dict[str, Any], node_client: SimulatorFullNodeRpcClient) -> None:
+async def print_wallets(config: dict[str, Any], node_client: SimulatorFullNodeRpcClient) -> None:
     ph_and_amount = await node_client.get_all_puzzle_hashes()
     address_prefix = config["network_overrides"]["config"][config["selected_network"]]["address_prefix"]
     name = "mojo"
@@ -407,7 +407,7 @@ async def print_status(
     from chia.cmds.show_funcs import print_blockchain_state
     from chia.cmds.units import units
 
-    async with get_any_service_client(SimulatorFullNodeRpcClient, rpc_port, root_path) as (node_client, config):
+    async with get_any_service_client(SimulatorFullNodeRpcClient, root_path, rpc_port) as (node_client, config):
         # Display keychain info
         if show_key:
             if fingerprint is None:
@@ -451,7 +451,7 @@ async def revert_block_height(
     """
     This function allows users to easily revert the chain to a previous state or perform a reorg.
     """
-    async with get_any_service_client(SimulatorFullNodeRpcClient, rpc_port, root_path) as (node_client, _):
+    async with get_any_service_client(SimulatorFullNodeRpcClient, root_path, rpc_port) as (node_client, _):
         if use_revert_blocks:
             if num_new_blocks != 1:
                 print(f"Ignoring num_new_blocks: {num_new_blocks}, because we are not performing a reorg.")
@@ -479,7 +479,7 @@ async def farm_blocks(
     """
     This function is used to generate new blocks.
     """
-    async with get_any_service_client(SimulatorFullNodeRpcClient, rpc_port, root_path) as (node_client, config):
+    async with get_any_service_client(SimulatorFullNodeRpcClient, root_path, rpc_port) as (node_client, config):
         if target_address == "":
             target_address = config["simulator"]["farming_address"]
         if target_address is None:
@@ -500,7 +500,7 @@ async def set_auto_farm(rpc_port: Optional[int], root_path: Path, set_autofarm: 
     """
     This function can be used to enable or disable Auto Farming.
     """
-    async with get_any_service_client(SimulatorFullNodeRpcClient, rpc_port, root_path) as (node_client, _):
+    async with get_any_service_client(SimulatorFullNodeRpcClient, root_path, rpc_port) as (node_client, _):
         current = await node_client.get_auto_farming()
         if current == set_autofarm:
             print(f"Auto farming is already {'on' if set_autofarm else 'off'}")

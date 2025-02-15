@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
+from chia.consensus.constants import ConsensusConstants
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.util.hash import std_hash
 from chia.util.ints import uint8, uint16, uint32, uint64, uint128
-
-from .constants import ConsensusConstants
 
 AGG_SIG_DATA = bytes32.fromhex("ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb")
 
@@ -84,7 +83,7 @@ DEFAULT_CONSTANTS = ConsensusConstants(
 )
 
 
-def update_testnet_overrides(network_id: str, overrides: Dict[str, Any]) -> None:
+def update_testnet_overrides(network_id: str, overrides: dict[str, Any]) -> None:
     if network_id == "testnet11":
         if "SOFT_FORK6_HEIGHT" not in overrides:
             overrides["SOFT_FORK6_HEIGHT"] = 2000000

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -o errexit
 
@@ -61,7 +61,7 @@ fi
 git submodule update --init mozilla-ca
 
 # You can specify preferred python version by exporting `INSTALL_PYTHON_VERSION`
-# e.g. `export INSTALL_PYTHON_VERSION=3.8`
+# e.g. `export INSTALL_PYTHON_VERSION=3.9`
 INSTALL_PYTHON_PATH=
 PYTHON_MAJOR_VER=
 PYTHON_MINOR_VER=
@@ -168,13 +168,27 @@ if [ "$OPENSSL_VERSION_INT" -lt "269488367" ]; then
   echo "Your OS may have patched OpenSSL and not updated the version to 1.1.1n"
 fi
 
-./setup-poetry.sh -c "${INSTALL_PYTHON_PATH}"
+if [ ! -f .penv/bin/poetry ]; then
+  ./setup-poetry.sh -c "${INSTALL_PYTHON_PATH}"
+fi
+
 .penv/bin/poetry env use "${INSTALL_PYTHON_PATH}"
 # shellcheck disable=SC2086
 .penv/bin/poetry install ${EXTRAS}
-ln -s -f .venv venv
+
+if [ -e venv ]; then
+  if [ -d venv ] && [ ! -L venv ]; then
+    echo "The 'venv' directory already exists. Please delete it before installing."
+    exit 1
+  elif [ -L venv ]; then
+    ln -sfn .venv venv
+  fi
+else
+  ln -s .venv venv
+fi
+
 if [ ! -f "activate" ]; then
-  ln -s venv/bin/activate .
+  ln -s .venv/bin/activate .
 fi
 
 if [ -z "$EDITABLE" ]; then
@@ -183,11 +197,11 @@ fi
 
 if [ -n "$PLOTTER_INSTALL" ]; then
   set +e
-  PREV_VENV="$VIRTUAL_ENV"
-  export VIRTUAL_ENV="venv"
+  # shellcheck disable=SC1091
+  . .venv/bin/activate
   ./install-plotter.sh bladebit
   ./install-plotter.sh madmax
-  export VIRTUAL_ENV="$PREV_VENV"
+  deactivate
   set -e
 fi
 
