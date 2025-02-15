@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from asyncio import Task, create_task, gather, sleep
+from asyncio import Task, gather, sleep
 from logging import Logger, getLogger
 from time import time
 from typing import Any, Dict, List, Optional
@@ -21,6 +21,7 @@ from chia.server.ws_connection import WSChiaConnection
 from chia.types.blockchain_format.proof_of_space import generate_plot_public_key
 from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.util.ints import uint8, uint64, uint128
+from chia.util.task_referencer import create_referenced_task
 
 DEFAULT_OG_POOL_URL: str = "https://farmer-chia-og.foxypool.io"
 
@@ -105,8 +106,8 @@ class OgPoolingManager:
         self._pool_state.difficulty = self._pool_minimum_difficulty
         await self._update_pool_difficulty()
 
-        self._update_pool_difficulty_task = create_task(self._periodically_update_pool_difficulty_task())
-        self._update_pool_info_task = create_task(self._periodically_update_pool_info_task())
+        self._update_pool_difficulty_task = create_referenced_task(self._periodically_update_pool_difficulty_task())
+        self._update_pool_info_task = create_referenced_task(self._periodically_update_pool_info_task())
 
     async def process_new_proof_of_space_for_og_pool(
         self,
