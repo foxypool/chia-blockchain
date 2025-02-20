@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "chia-blockchain"
 # see [tool.poetry-dynamic-versioning]
-version = "2.5.1+og-1.6.1"
+version = "2.5.2+og-1.6.1"
 description = "Chia blockchain full node, farmer, timelord, and wallet."
 authors = ["Mariano Sorgente <mariano@chia.net>"]
 license = "Apache-2.0"
