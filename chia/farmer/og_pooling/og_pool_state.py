@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from time import time
 
-from chia.util.ints import uint64
+from chia_rs.sized_ints import uint64
 
 
 class OgPoolState:
