@@ -14,13 +14,13 @@ import pytest
 
 # TODO: update after resolution in https://github.com/pytest-dev/pytest/issues/7469
 from _pytest.fixtures import SubRequest
-from chia_rs import G1Element
+from chia_rs import ConsensusConstants, G1Element
+from chia_rs.sized_bytes import bytes32
+from chia_rs.sized_ints import uint32, uint64
 
 from chia._tests.environments.wallet import WalletStateTransition, WalletTestFramework
 from chia._tests.util.setup_nodes import setup_simulators_and_wallets_service
 from chia._tests.util.time_out_assert import time_out_assert
-from chia.consensus.constants import ConsensusConstants
-from chia.pools.pool_puzzles import SINGLETON_LAUNCHER_HASH
 from chia.pools.pool_wallet_info import PoolSingletonState, PoolWalletInfo
 from chia.rpc.wallet_rpc_client import WalletRpcClient
 from chia.simulator.add_blocks_in_batches import add_blocks_in_batches
@@ -29,13 +29,12 @@ from chia.simulator.full_node_simulator import FullNodeSimulator
 from chia.simulator.simulator_protocol import ReorgProtocol
 from chia.simulator.start_simulator import SimulatorFullNodeService
 from chia.types.aliases import WalletService
-from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.peer_info import PeerInfo
 from chia.util.bech32m import encode_puzzle_hash
 from chia.util.byte_types import hexstr_to_bytes
 from chia.util.config import load_config
-from chia.util.ints import uint32, uint64
 from chia.wallet.derive_keys import find_authentication_sk, find_owner_sk
+from chia.wallet.singleton import SINGLETON_LAUNCHER_PUZZLE_HASH as SINGLETON_LAUNCHER_HASH
 from chia.wallet.transaction_record import TransactionRecord
 from chia.wallet.util.transaction_type import TransactionType
 from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG

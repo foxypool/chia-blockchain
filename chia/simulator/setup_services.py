@@ -11,8 +11,12 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, Optional, Union
 
+from chia_rs import ConsensusConstants
+from chia_rs.sized_bytes import bytes32
+from chia_rs.sized_ints import uint16
+
 from chia.cmds.init_funcs import init
-from chia.consensus.constants import ConsensusConstants, replace_str_to_bytes
+from chia.consensus.constants import replace_str_to_bytes
 from chia.daemon.server import WebSocketServer, daemon_launch_lock_path
 from chia.protocols.shared_protocol import Capability, default_capabilities
 from chia.seeder.dns_server import DNSServer, create_dns_server_service
@@ -40,12 +44,10 @@ from chia.types.aliases import (
     TimelordService,
     WalletService,
 )
-from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.peer_info import UnresolvedPeerInfo
 from chia.util.bech32m import encode_puzzle_hash
 from chia.util.config import config_path_for_filename, load_config, lock_and_load_config, save_config, set_peer_info
 from chia.util.db_wrapper import generate_in_memory_db_uri
-from chia.util.ints import uint16
 from chia.util.keychain import bytes_to_mnemonic
 from chia.util.lock import Lockfile
 from chia.util.task_referencer import create_referenced_task

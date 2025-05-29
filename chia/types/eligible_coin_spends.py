@@ -5,19 +5,18 @@ import dataclasses
 from collections.abc import Awaitable
 from typing import Callable, Optional
 
-from chia_rs import fast_forward_singleton, get_conditions_from_spendbundle
+from chia_rs import ConsensusConstants, fast_forward_singleton, get_conditions_from_spendbundle
+from chia_rs.sized_bytes import bytes32
+from chia_rs.sized_ints import uint32, uint64
 
 from chia.consensus.condition_costs import ConditionCost
-from chia.consensus.constants import ConsensusConstants
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.serialized_program import SerializedProgram
-from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.coin_spend import CoinSpend
 from chia.types.internal_mempool_item import InternalMempoolItem
 from chia.types.mempool_item import BundleCoinSpend
 from chia.types.spend_bundle import SpendBundle
 from chia.util.errors import Err
-from chia.util.ints import uint32, uint64
 
 
 @dataclasses.dataclass(frozen=True)
@@ -144,6 +143,11 @@ def perform_the_fast_forward(
     return new_coin_spend, patched_additions
 
 
+@dataclasses.dataclass
+class SkipDedup(BaseException):
+    msg: str
+
+
 @dataclasses.dataclass(frozen=True)
 class EligibleCoinSpends:
     deduplication_spends: dict[bytes32, DedupCoinSpend] = dataclasses.field(default_factory=dict)
@@ -201,7 +205,7 @@ class EligibleCoinSpends:
                 # even if they end up saving more cost, as we're going for the first
                 # solution we see from the relatively highest FPC item, to avoid
                 # severe performance and/or time-complexity impact
-                raise ValueError("Solution is different from what we're deduplicating on")
+                raise SkipDedup("Solution is different from what we're deduplicating on")
             # Let's calculate the saved cost if we never did that before
             if duplicate_cost is None:
                 # See first if this mempool item had this cost computed before

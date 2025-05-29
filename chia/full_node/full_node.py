@@ -18,10 +18,14 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, TextIO, Uni
 from chia_rs import (
     AugSchemeMPL,
     BLSCache,
+    ConsensusConstants,
+    PoolTarget,
     get_flags_for_height_and_constants,
     run_block_generator,
     run_block_generator2,
 )
+from chia_rs.sized_bytes import bytes32
+from chia_rs.sized_ints import uint8, uint32, uint64, uint128
 from packaging.version import Version
 
 from chia.consensus.block_body_validation import ForkInfo
@@ -29,13 +33,13 @@ from chia.consensus.block_creation import unfinished_block_to_full_block
 from chia.consensus.block_record import BlockRecord
 from chia.consensus.blockchain import AddBlockResult, Blockchain, BlockchainMutexPriority, StateChangeSummary
 from chia.consensus.blockchain_interface import BlockchainInterface
-from chia.consensus.constants import ConsensusConstants
 from chia.consensus.cost_calculator import NPCResult
 from chia.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
 from chia.consensus.make_sub_epoch_summary import next_sub_epoch_summary
 from chia.consensus.multiprocess_validation import PreValidationResult, pre_validate_block
 from chia.consensus.pot_iterations import calculate_sp_iters
 from chia.full_node.block_store import BlockStore
+from chia.full_node.check_fork_next_block import check_fork_next_block
 from chia.full_node.coin_store import CoinStore
 from chia.full_node.full_node_api import FullNodeAPI
 from chia.full_node.full_node_store import FullNodeStore, FullNodeStorePeakResult, UnfinishedBlockEntry
@@ -60,8 +64,6 @@ from chia.server.outbound_message import Message, NodeType, make_msg
 from chia.server.server import ChiaServer
 from chia.server.ws_connection import WSChiaConnection
 from chia.types.blockchain_format.classgroup import ClassgroupElement
-from chia.types.blockchain_format.pool_target import PoolTarget
-from chia.types.blockchain_format.sized_bytes import bytes32
 from chia.types.blockchain_format.sub_epoch_summary import SubEpochSummary
 from chia.types.blockchain_format.vdf import CompressibleVDFField, VDFInfo, VDFProof, validate_vdf
 from chia.types.coin_record import CoinRecord
@@ -78,14 +80,12 @@ from chia.types.validation_state import ValidationState
 from chia.types.weight_proof import WeightProof
 from chia.util.augmented_chain import AugmentedBlockchain
 from chia.util.bech32m import encode_puzzle_hash
-from chia.util.check_fork_next_block import check_fork_next_block
 from chia.util.condition_tools import pkm_pairs
 from chia.util.config import process_config_start_method
 from chia.util.db_synchronous import db_synchronous_on
 from chia.util.db_version import lookup_db_version, set_db_version_async
 from chia.util.db_wrapper import DBWrapper2, manage_connection
 from chia.util.errors import ConsensusError, Err, TimestampError, ValidationError
-from chia.util.ints import uint8, uint32, uint64, uint128
 from chia.util.limited_semaphore import LimitedSemaphore
 from chia.util.network import is_localhost
 from chia.util.path import path_from_root
@@ -620,6 +620,7 @@ class FullNode:
                 fork_hash = self.constants.GENESIS_CHALLENGE
             assert fork_hash
             fork_info = ForkInfo(start_height - 1, start_height - 1, fork_hash)
+            blockchain = AugmentedBlockchain(self.blockchain)
             for height in range(start_height, target_height, batch_size):
                 end_height = min(target_height, height + batch_size)
                 request = RequestBlocks(uint32(height), uint32(end_height), True)
@@ -638,7 +639,7 @@ class FullNode:
                     )
                     vs = ValidationState(ssi, diff, None)
                     success, state_change_summary = await self.add_block_batch(
-                        response.blocks, peer_info, fork_info, vs
+                        response.blocks, peer_info, fork_info, vs, blockchain
                     )
                     if not success:
                         raise ValueError(f"Error short batch syncing, failed to validate blocks {height}-{end_height}")
@@ -757,7 +758,7 @@ class FullNode:
         # Store this peak/peer combination in case we want to sync to it, and to keep track of peers
         self.sync_store.peer_has_block(request.header_hash, peer.peer_node_id, request.weight, request.height, True)
 
-        if self.blockchain.contains_block(request.header_hash):
+        if self.blockchain.contains_block(request.header_hash, request.height):
             return None
 
         # Not interested in less heavy peaks
@@ -1248,7 +1249,7 @@ class FullNode:
                                 # By setting the next allowed timestamp to now,
                                 # means that any other peer that has waited for
                                 # this will have its next allowed timestamp in
-                                # the passed, and be prefered multiple times
+                                # the passed, and be preferred multiple times
                                 # over this peer.
                                 new_peers_with_peak[idx] = (
                                     new_peers_with_peak[idx][0],
@@ -1486,13 +1487,13 @@ class FullNode:
         peer_info: PeerInfo,
         fork_info: ForkInfo,
         vs: ValidationState,  # in-out parameter
+        blockchain: AugmentedBlockchain,
         wp_summaries: Optional[list[SubEpochSummary]] = None,
     ) -> tuple[bool, Optional[StateChangeSummary]]:
         # Precondition: All blocks must be contiguous blocks, index i+1 must be the parent of index i
         # Returns a bool for success, as well as a StateChangeSummary if the peak was advanced
 
         pre_validate_start = time.monotonic()
-        blockchain = AugmentedBlockchain(self.blockchain)
         blocks_to_validate = await self.skip_blocks(blockchain, all_blocks, fork_info, vs)
 
         if len(blocks_to_validate) == 0:
@@ -2026,7 +2027,7 @@ class FullNode:
 
         # Adds the block to seen, and check if it's seen before (which means header is in memory)
         header_hash = block.header_hash
-        if self.blockchain.contains_block(header_hash):
+        if self.blockchain.contains_block(header_hash, block.height):
             if fork_info is not None:
                 await self.blockchain.run_single_block(block, fork_info)
             return None
@@ -2100,7 +2101,7 @@ class FullNode:
             enable_profiler(self.profile_block_validation) as pr,
         ):
             # After acquiring the lock, check again, because another asyncio thread might have added it
-            if self.blockchain.contains_block(header_hash):
+            if self.blockchain.contains_block(header_hash, block.height):
                 if fork_info is not None:
                     await self.blockchain.run_single_block(block, fork_info)
                 return None
@@ -2133,7 +2134,8 @@ class FullNode:
             )
             pre_validation_result = await future
             added: Optional[AddBlockResult] = None
-            pre_validation_time = time.monotonic() - validation_start
+            add_block_start = time.monotonic()
+            pre_validation_time = add_block_start - validation_start
             try:
                 if pre_validation_result.error is not None:
                     if Err(pre_validation_result.error) == Err.INVALID_PREV_BLOCK_HASH:
@@ -2152,6 +2154,7 @@ class FullNode:
                     (added, error_code, state_change_summary) = await self.blockchain.add_block(
                         block, pre_validation_result, ssi, fork_info
                     )
+                add_block_time = time.monotonic() - add_block_start
                 if added == AddBlockResult.ALREADY_HAVE_BLOCK:
                     return None
                 elif added == AddBlockResult.INVALID_BLOCK:
@@ -2180,7 +2183,7 @@ class FullNode:
                     self.log.info(
                         f"Received orphan block of height {block.height} rh {block.reward_chain_block.get_hash()}"
                     )
-                    post_process_time = 0
+                    post_process_time = 0.0
                 else:
                     # Should never reach here, all the cases are covered
                     raise RuntimeError(f"Invalid result from add_block {added}")
@@ -2196,7 +2199,11 @@ class FullNode:
 
         if ppp_result is not None:
             assert state_change_summary is not None
+            post_process_time2 = time.monotonic()
             await self.peak_post_processing_2(block, peer, state_change_summary, ppp_result)
+            post_process_time2 = time.monotonic() - post_process_time2
+        else:
+            post_process_time2 = 0.0
 
         percent_full_str = (
             (
@@ -2212,7 +2219,9 @@ class FullNode:
             f"Block validation: {validation_time:0.2f}s, "
             f"pre_validation: {pre_validation_time:0.2f}s, "
             f"CLVM: {pre_validation_result.timing / 1000.0:0.2f}s, "
+            f"add-block: {add_block_time:0.2f}s, "
             f"post-process: {post_process_time:0.2f}s, "
+            f"post-process2: {post_process_time2:0.2f}s, "
             f"cost: {block.transactions_info.cost if block.transactions_info is not None else 'None'}"
             f"{percent_full_str} header_hash: {header_hash.hex()} height: {block.height}",
         )
@@ -2288,8 +2297,9 @@ class FullNode:
         """
         receive_time = time.time()
 
-        if block.prev_header_hash != self.constants.GENESIS_CHALLENGE and not self.blockchain.contains_block(
-            block.prev_header_hash
+        if (
+            block.prev_header_hash != self.constants.GENESIS_CHALLENGE
+            and self.blockchain.try_block_record(block.prev_header_hash) is None
         ):
             # No need to request the parent, since the peer will send it to us anyway, via NewPeak
             self.log.debug("Received a disconnected unfinished block")
@@ -2845,10 +2855,16 @@ class FullNode:
 
         total_time = time.monotonic() - start_time
 
-        self.log.log(
-            logging.DEBUG if total_time < 0.5 else logging.WARNING,
-            f"Broadcasting added transaction {mempool_item.name} to {len(peer_ids)} peers took {total_time:.4f}s",
-        )
+        if len(peer_ids) == 0:
+            self.log.log(
+                logging.DEBUG if total_time < 0.5 else logging.WARNING,
+                f"Looking up hints for {len(conds.spends)} spends took {total_time:.4f}s",
+            )
+        else:
+            self.log.log(
+                logging.DEBUG if total_time < 0.5 else logging.WARNING,
+                f"Broadcasting added transaction {mempool_item.name} to {len(peer_ids)} peers took {total_time:.4f}s",
+            )
 
     async def broadcast_removed_tx(self, mempool_removals: list[MempoolRemoveInfo]) -> None:
         total_removals = sum(len(r.items) for r in mempool_removals)
